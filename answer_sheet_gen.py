@@ -15,6 +15,7 @@ Coordinate system: ReportLab — origin at page bottom-left, y grows upward.
 
 from __future__ import annotations
 import io
+import secrets
 from dataclasses import dataclass
 from typing import Literal
 
@@ -60,14 +61,14 @@ _ID_ZONE_R      = PAGE_W - QR_EDGE - QR_SIZE        # left edge of TR QR
 _ID_ZONE_CY     = PAGE_H - QR_EDGE - QR_SIZE / 2   # vertical centre of top QR band
 
 # ── Header area (top of content rectangle) ────────────────────────────────────
-HEADER_H = 17 * mm            # title + name line + separator
+HEADER_H = 20 * mm            # title + name line + separator
 
 # ── MCQ grid ──────────────────────────────────────────────────────────────────
 # Target ~7 mm per column; with CW ≈ 198 mm that gives ~27 columns.
 GRID_LBL_W    = 9.0 * mm     # left column that holds "a / b / c …"
 GRID_NUM_H    = 5.5 * mm     # question-number header row height
-GRID_OPT_H    = 6.5 * mm     # height per option row
-_TARGET_Q_W   = 7.0 * mm     # desired column width
+GRID_OPT_H    = 5.0 * mm     # height per option row (smaller cells → smaller boxes)
+_TARGET_Q_W   = 6.0 * mm     # desired column width (smaller cells → smaller boxes)
 QUES_PER_ROW  = max(10, int((CW - GRID_LBL_W) / _TARGET_Q_W))  # auto, ≈ 27
 GRID_Q_W      = (CW - GRID_LBL_W) / QUES_PER_ROW   # exact column width
 GRID_SEC_GAP  = 5.0 * mm     # vertical gap between any two sections
@@ -76,7 +77,7 @@ GRID_SEC_GAP  = 5.0 * mm     # vertical gap between any two sections
 NUM_BOX_W       = 5.8 * mm   # each digit box width
 NUM_BOX_H       = 8.0 * mm   # each digit box height
 NUM_BOX_GAP     = 0.8 * mm   # gap between boxes
-NUM_DOT_W       = 3.8 * mm   # space occupied by decimal dot separator
+NUM_DOT_BOX_W   = NUM_BOX_W  # decimal-point box same size as digit boxes
 NUM_Q_LBL_W    = 10.0 * mm  # width of "Q." label
 NUM_ROW_H       = NUM_BOX_H + 3.5 * mm   # total height per numeric row
 _NUM_Q_GAP      = 5.0 * mm   # horizontal gap between questions in the same row
@@ -107,7 +108,7 @@ class NumericQuestion:
     def content_width(self) -> float:
         w = self.n_digits * (NUM_BOX_W + NUM_BOX_GAP)
         if self.has_decimal:
-            w += NUM_DOT_W + NUM_BOX_GAP
+            w += NUM_DOT_BOX_W + NUM_BOX_GAP
         return w
 
     def validate(self):
@@ -145,23 +146,45 @@ def _mcq_section_h(max_opts: int) -> float:
     return GRID_NUM_H + max_opts * GRID_OPT_H
 
 
+def _max_row_width(rows: list[list[tuple]]) -> float:
+    """Actual maximum width used by any packed row."""
+    max_w = 0.0
+    for row in rows:
+        if row:
+            last_q, last_x = row[-1]
+            max_w = max(max_w, last_x + NUM_Q_LBL_W + last_q.content_width())
+    return max_w
+
+
 def _pack_rows(questions: list[NumericQuestion], width: float) -> list[list[tuple]]:
-    """Pack numeric questions left-to-right within `width`. Returns rows of (q, x_offset)."""
+    """
+    Pack numeric questions into rows using best-fit: when a question doesn't fit
+    in the current row's remaining space, keep scanning for a smaller one that
+    does instead of immediately starting a new row.
+    Returns rows of (q, x_offset).
+    """
+    remaining = list(questions)
     rows: list[list[tuple]] = []
-    row:  list[tuple]       = []
-    x = 0.0
-    for q in questions:
-        q_w    = NUM_Q_LBL_W + q.content_width()
-        needed = q_w + (_NUM_Q_GAP if row else 0.0)
-        if row and x + needed > width:
-            rows.append(row)
-            row, x = [(q, 0.0)], q_w
-        else:
-            ox = x + (_NUM_Q_GAP if row else 0.0)
-            row.append((q, ox))
-            x = ox + q_w
-    if row:
+
+    while remaining:
+        row: list[tuple] = []
+        x = 0.0
+        placed_indices: set[int] = set()
+
+        for idx, q in enumerate(remaining):
+            q_w    = NUM_Q_LBL_W + q.content_width()
+            gap    = _NUM_Q_GAP if row else 0.0
+            if x + gap + q_w <= width:
+                ox = x + gap
+                row.append((q, ox))
+                x = ox + q_w
+                placed_indices.add(idx)
+
+        remaining = [q for i, q in enumerate(remaining) if i not in placed_indices]
+        if not row:
+            break   # nothing fits at all (safety)
         rows.append(row)
+
     return rows
 
 
@@ -172,30 +195,79 @@ def _pack_in_panel(
 ) -> tuple[list[list[tuple]], int]:
     """
     Pack as many questions as fit in a panel of (panel_w × panel_h).
-    Returns (rows, n_placed).  Stops when height or width is exhausted.
+    Uses best-fit within each row (skips questions too wide, fills gap with smaller ones).
+    Returns (rows, n_placed).  Stops when height is exhausted.
     """
-    max_rows = max(1, int(panel_h / NUM_ROW_H))
+    max_rows  = max(1, int(panel_h / NUM_ROW_H))
     rows: list[list[tuple]] = []
-    row:  list[tuple]       = []
-    x, placed = 0.0, 0
-    for q in questions:
-        q_w    = NUM_Q_LBL_W + q.content_width()
-        needed = q_w + (_NUM_Q_GAP if row else 0.0)
-        if q_w > panel_w:
-            break                          # too wide for any row
-        if row and x + needed > panel_w:
-            if len(rows) + 1 >= max_rows:
-                break                      # no more height
-            rows.append(row)
-            row, x = [(q, 0.0)], q_w
-        else:
-            ox = x + (_NUM_Q_GAP if row else 0.0)
-            row.append((q, ox))
-            x = ox + q_w
-        placed += 1
-    if row:
+    eligible  = [q for q in questions if NUM_Q_LBL_W + q.content_width() <= panel_w]
+    remaining = list(eligible)
+
+    while remaining and len(rows) < max_rows:
+        row = []
+        x = 0.0
+        placed_idx: set[int] = set()
+
+        for idx, q in enumerate(remaining):
+            q_w  = NUM_Q_LBL_W + q.content_width()
+            gap  = _NUM_Q_GAP if row else 0.0
+            if x + gap + q_w <= panel_w:
+                ox = x + gap
+                row.append((q, ox))
+                x = ox + q_w
+                placed_idx.add(idx)
+
+        remaining = [q for i, q in enumerate(remaining) if i not in placed_idx]
+        if not row:
+            break
         rows.append(row)
-    return rows, placed
+
+    placed_qs = {id(q) for r in rows for q, _ in r}
+    n_placed = sum(1 for q in questions if id(q) in placed_qs)
+    return rows, n_placed
+
+
+def _optimal_order(questions: list[Question]) -> tuple[list[Question], list[int]]:
+    """
+    Reorder questions for minimal page height.
+
+    Strategy
+    --------
+    1. Group MCQ by n_options (ascending).
+       Each layout chunk uses height = GRID_NUM_H + max_opts * GRID_OPT_H.
+       Mixing option counts inflates every row in a chunk to the tallest option.
+       Grouping same-option questions together ensures each chunk is exactly as
+       tall as it needs to be.
+
+    2. Sort Numeric by content_width() descending (first-fit-decreasing).
+       Wide questions fill complete rows; the narrowest questions fall into the
+       last row, leaving the maximum horizontal gap for an MCQ side panel.
+
+    3. All MCQ before all Numeric.
+       The last MCQ chunk absorbs numeric questions in its right side panel,
+       and any remaining narrow numerics can absorb MCQ in their right side.
+
+    Returns
+    -------
+    (reordered_questions, original_1based_indices)
+    original_1based_indices[k] is the original question number of the k-th
+    question in the returned list.
+    """
+    indexed = list(enumerate(questions, 1))   # (1-based-index, question)
+
+    mcq_idx = [(i, q) for i, q in indexed if isinstance(q, MCQQuestion)]
+    num_idx = [(i, q) for i, q in indexed if isinstance(q, NumericQuestion)]
+
+    # MCQ: stable sort by n_options ascending — groups same-height questions
+    mcq_sorted = sorted(mcq_idx, key=lambda x: x[1].n_options)
+
+    # Numeric: sort by total box width descending — narrowest questions land last
+    num_sorted = sorted(num_idx, key=lambda x: x[1].content_width(), reverse=True)
+
+    combined       = mcq_sorted + num_sorted
+    new_questions  = [q for _, q in combined]
+    original_order = [i for i, _ in combined]
+    return new_questions, original_order
 
 
 def _plan_layout(questions: list[Question]) -> list[dict]:
@@ -249,18 +321,44 @@ def _plan_layout(questions: list[Question]) -> list[dict]:
                     if pw > NUM_Q_LBL_W:
                         side_rows, n_side = _pack_in_panel(questions[j:k], pw, mcq_h)
 
+                # After placing numeric in side panel, check if MCQ fits further right
+                side_mcq2, side_mcq2_q0, side_mcq2_x, side_num_nat_w = [], 0, CR, 0
+                if side_rows:
+                    side_num_nat_w = _max_row_width(side_rows)
+                    side_x_pos = CL + mcq_w + _NUM_PANEL_GAP
+                    extra_x = side_x_pos + side_num_nat_w + _NUM_PANEL_GAP
+                    extra_w = CR - extra_x
+                    extra_cols = int((extra_w - GRID_LBL_W) / GRID_Q_W) if extra_w > GRID_LBL_W else 0
+                    if extra_cols >= 1:
+                        nxt = j + n_side
+                        if nxt < n and isinstance(questions[nxt], MCQQuestion):
+                            chunk2 = []
+                            k2 = nxt
+                            while k2 < n and isinstance(questions[k2], MCQQuestion) and len(chunk2) < extra_cols:
+                                chunk2.append(questions[k2])
+                                k2 += 1
+                            if chunk2:
+                                side_mcq2     = chunk2
+                                side_mcq2_q0  = q_num + len(run) + n_side
+                                side_mcq2_x   = extra_x
+                                side_num_nat_w = side_num_nat_w  # keep for x_right of numeric panel
+
                 if is_last:
-                    n_beside = n_side
+                    n_beside = n_side + len(side_mcq2)
 
                 bands.append({
-                    'kind':        'mcq',
-                    'mcq':         chunk,
-                    'mcq_q0':      q_num + ci * QUES_PER_ROW,
-                    'mcq_draw_w':  mcq_w if side_rows else CW,
-                    'height':      mcq_h,
-                    'side_rows':   side_rows,
-                    'side_q0':     q_num + len(run),   # numbered after all MCQ in run
-                    'side_x':      CL + mcq_w + _NUM_PANEL_GAP,
+                    'kind':           'mcq',
+                    'mcq':            chunk,
+                    'mcq_q0':         q_num + ci * QUES_PER_ROW,
+                    'mcq_draw_w':     mcq_w if side_rows else CW,
+                    'height':         mcq_h,
+                    'side_rows':      side_rows,
+                    'side_q0':        q_num + len(run),
+                    'side_x':         CL + mcq_w + _NUM_PANEL_GAP,
+                    'side_num_nat_w': side_num_nat_w,
+                    'side_mcq2':      side_mcq2,
+                    'side_mcq2_q0':   side_mcq2_q0,
+                    'side_mcq2_x':    side_mcq2_x,
                 })
 
             q_num += len(run) + n_beside
@@ -273,14 +371,42 @@ def _plan_layout(questions: list[Question]) -> list[dict]:
                 j += 1
             run  = questions[i:j]
             rows = _pack_rows(run, CW)
+            num_h = len(rows) * NUM_ROW_H
+
+            # Try placing MCQ to the right when next segment is MCQ
+            side_mcq, n_mcq_side, side_mcq_q0, num_draw_w = [], 0, 0, CW
+            if j < n and isinstance(questions[j], MCQQuestion):
+                nat_w  = _max_row_width(rows)        # width naturally used
+                panel_w = CW - nat_w - _NUM_PANEL_GAP
+                mcq_cols = int((panel_w - GRID_LBL_W) / GRID_Q_W) if panel_w > GRID_LBL_W else 0
+                if mcq_cols >= 1:
+                    # only take consecutive MCQ questions
+                    k = j
+                    while k < n and isinstance(questions[k], MCQQuestion) and k - j < mcq_cols:
+                        k += 1
+                    chunk = questions[j:k]
+                    if chunk:
+                        mcq_h = _mcq_section_h(max(q.n_options for q in chunk))
+                        side_mcq     = chunk
+                        n_mcq_side   = len(chunk)
+                        side_mcq_q0  = q_num + len(run)
+                        num_draw_w   = nat_w
+                        rows = _pack_rows(run, nat_w)   # repack tighter
+                        # band height expands if MCQ is taller than numeric rows
+                        num_h = max(num_h, mcq_h)
+
             bands.append({
-                'kind':     'num',
-                'num_rows': rows,
-                'num_q0':   q_num,
-                'height':   len(rows) * NUM_ROW_H,
+                'kind':        'num',
+                'num_rows':    rows,
+                'num_draw_w':  num_draw_w,
+                'num_q0':      q_num,
+                'height':      num_h,
+                'side_mcq':    side_mcq,
+                'side_mcq_q0': side_mcq_q0,
+                'side_mcq_x':  CL + num_draw_w + _NUM_PANEL_GAP,
             })
-            q_num += len(run)
-            i      = j
+            q_num += len(run) + n_mcq_side
+            i      = j + n_mcq_side
 
     return bands
 
@@ -334,8 +460,9 @@ def report_capacity(questions: list[Question]) -> None:
 def _make_qr(data: str) -> ImageReader:
     qr = qrcode.QRCode(
         version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_H,
-        box_size=10, border=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=1,
+        border=4,
     )
     qr.add_data(data)
     qr.make(fit=True)
@@ -350,14 +477,15 @@ def _make_qr(data: str) -> ImageReader:
 # DRAWING PRIMITIVES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _draw_corner_qrs(c: canvas.Canvas, test_id: str, variant: str) -> None:
-    for corner, (x, y) in {
-        "TL": (QR_EDGE,                    PAGE_H - QR_EDGE - QR_SIZE),
-        "TR": (PAGE_W - QR_EDGE - QR_SIZE, PAGE_H - QR_EDGE - QR_SIZE),
-        "BL": (QR_EDGE,                    QR_EDGE),
-        "BR": (PAGE_W - QR_EDGE - QR_SIZE, QR_EDGE),
-    }.items():
-        c.drawImage(_make_qr(f"HVH|{test_id}|{variant}|{corner}"),
+def _draw_corner_qrs(c: canvas.Canvas, sheet_id: str) -> None:
+    """Each QR encodes its corner prefix + sheet_id: TL<id>, TR<id>, BL<id>, BR<id>."""
+    for corner, (x, y) in [
+        ("TL", (QR_EDGE,                    PAGE_H - QR_EDGE - QR_SIZE)),
+        ("TR", (PAGE_W - QR_EDGE - QR_SIZE, PAGE_H - QR_EDGE - QR_SIZE)),
+        ("BL", (QR_EDGE,                    QR_EDGE)),
+        ("BR", (PAGE_W - QR_EDGE - QR_SIZE, QR_EDGE)),
+    ]:
+        c.drawImage(_make_qr(f"{corner}{sheet_id}"),
                     x, y, width=QR_SIZE, height=QR_SIZE, mask="auto")
 
 
@@ -389,22 +517,25 @@ def _draw_student_id(c: canvas.Canvas) -> None:
 
 def _draw_header(c: canvas.Canvas, title: str, variant: str, date: str) -> None:
     y = CT
+
+    # Title row — 3 mm breathing room below the top content border
     c.setFont("Helvetica-Bold", 11)
     c.setFillColor(colors.black)
-    c.drawString(CL, y - 6 * mm, title)
+    _H_PAD = 3 * mm   # inward padding from content border for header text
+    c.drawString(CL + _H_PAD, y - 8 * mm, title)
 
     c.setFont("Helvetica", 8)
-    c.drawRightString(CR, y - 6 * mm, f"Variant {variant}   {date}")
+    c.drawRightString(CR - _H_PAD, y - 8 * mm, f"Variant {variant}   {date}")
 
-    # Name line
+    # Name row — text first, underline 1.5 mm below its baseline
     c.setFont("Helvetica", 8)
     c.setFillColorRGB(0.25, 0.25, 0.25)
-    c.drawString(CL, y - 11 * mm, "Full name:")
+    c.drawString(CL + _H_PAD, y - 15 * mm, "Full name:")
+    c.drawString(CR - 26 * mm, y - 15 * mm, "Class:")
     c.setStrokeColor(colors.black)
     c.setLineWidth(0.5)
-    c.line(CL + 22 * mm, y - 10.5 * mm, CR - 28 * mm, y - 10.5 * mm)
-    c.drawString(CR - 26 * mm, y - 11 * mm, "Class:")
-    c.line(CR - 15 * mm, y - 10.5 * mm, CR, y - 10.5 * mm)
+    c.line(CL + 22 * mm, y - 16.5 * mm, CR - 28 * mm, y - 16.5 * mm)
+    c.line(CR - 15 * mm, y - 16.5 * mm, CR - _H_PAD,   y - 16.5 * mm)
 
     # Bottom border of header
     c.setStrokeColorRGB(0.35, 0.35, 0.35)
@@ -415,22 +546,24 @@ def _draw_header(c: canvas.Canvas, title: str, variant: str, date: str) -> None:
 
 def _draw_mcq_section(c: canvas.Canvas, y_top: float,
                       questions: list[MCQQuestion],
-                      q_start: int, *, draw_w: float = None) -> float:
+                      q_start: int, *,
+                      draw_w: float = None,
+                      x_start: float = None) -> float:
     """
-    Draw one MCQ grid section. draw_w lets it be narrower than CW when
-    a numeric side panel will fill the remaining space.
+    Draw one MCQ grid section.
+    draw_w : explicit width (defaults to CW or distance to CR from x_start).
+    x_start: left edge (defaults to CL); used when placed beside numeric.
     Returns height consumed.
     """
     max_opts = max(q.n_options for q in questions)
     sec_h    = _mcq_section_h(max_opts)
     opts     = "abcdef"
     n        = len(questions)
-    w        = draw_w if draw_w is not None else CW
-
-    x0 = CL  # left of whole grid (label column starts here)
+    x0       = x_start if x_start is not None else CL
+    w        = draw_w if draw_w is not None else (CR - x0)
 
     # ── Question-number header row ─────────────────────────────────────────────
-    c.setFont("Helvetica-Bold", 6)
+    c.setFont("Helvetica-Bold", 8)
     c.setFillColor(colors.black)
     for i in range(n):
         cx = x0 + GRID_LBL_W + i * GRID_Q_W + GRID_Q_W / 2
@@ -443,18 +576,21 @@ def _draw_mcq_section(c: canvas.Canvas, y_top: float,
         row_bot = row_top - GRID_OPT_H
 
         # Letter label in the leftmost column
-        c.setFont("Helvetica", 7)
+        c.setFont("Helvetica-Bold", 9)
         c.setFillColor(colors.black)
         c.drawCentredString(x0 + GRID_LBL_W / 2,
-                            row_bot + GRID_OPT_H / 2 - 2 * mm,
+                            row_bot + GRID_OPT_H / 2 - 1.5 * mm,
                             opts[opt_i])
 
         # One box per question column
         for q_i, q in enumerate(questions):
-            bx = x0 + GRID_LBL_W + q_i * GRID_Q_W + 0.7 * mm
-            by = row_bot + 0.7 * mm
-            bw = GRID_Q_W - 1.4 * mm
-            bh = GRID_OPT_H - 1.4 * mm
+            cell_x = x0 + GRID_LBL_W + q_i * GRID_Q_W
+            cell_y = row_bot
+            side = min(GRID_Q_W, GRID_OPT_H) - 1.4 * mm   # square side
+            bx = cell_x + (GRID_Q_W   - side) / 2
+            by = cell_y + (GRID_OPT_H - side) / 2
+            bw = side
+            bh = side
 
             if opt_i < q.n_options:
                 c.setFillColor(colors.white)
@@ -537,15 +673,19 @@ def _draw_num_rows(c: canvas.Canvas, x_left: float, x_right: float,
             bx = col_x + NUM_Q_LBL_W
             for d in range(q.n_digits):
                 if q.has_decimal and d == q.decimal_pos:
-                    c.setFillColor(colors.black)
-                    c.circle(bx + NUM_DOT_W / 2,
-                             box_top + NUM_BOX_H * 0.18, 1.0 * mm, stroke=0, fill=1)
-                    bx += NUM_DOT_W + NUM_BOX_GAP
+                    # Writable decimal-point box — student writes "."
+                    c.setFillColor(colors.white)
+                    c.setStrokeColor(colors.black)
+                    c.setLineWidth(0.5)
+                    c.setDash([1, 4])
+                    c.rect(bx, box_top, NUM_DOT_BOX_W, NUM_BOX_H, stroke=1, fill=1)
+                    c.setDash([])
+                    bx += NUM_DOT_BOX_W + NUM_BOX_GAP
 
                 c.setFillColor(colors.white)
                 c.setStrokeColor(colors.black)
                 c.setLineWidth(0.5)
-                c.setDash([2, 2])
+                c.setDash([1, 4])
                 c.rect(bx, box_top, NUM_BOX_W, NUM_BOX_H, stroke=1, fill=1)
                 c.setDash([])
                 bx += NUM_BOX_W + NUM_BOX_GAP
@@ -556,9 +696,11 @@ def _draw_num_rows(c: canvas.Canvas, x_left: float, x_right: float,
 
 
 def _draw_numeric_section(c: canvas.Canvas, y_top: float,
-                          rows: list, q_start: int) -> float:
-    """Full-width numeric section from pre-packed rows."""
-    return _draw_num_rows(c, CL, CR, y_top, rows, q_start)
+                          rows: list, q_start: int,
+                          x_right: float = None) -> float:
+    """Full-width (or right-bounded) numeric section from pre-packed rows."""
+    return _draw_num_rows(c, CL, x_right if x_right is not None else CR,
+                          y_top, rows, q_start)
 
 
 def _draw_numeric_panel(c: canvas.Canvas, x_left: float, y_top: float,
@@ -574,16 +716,28 @@ def _draw_numeric_panel(c: canvas.Canvas, x_left: float, y_top: float,
 def generate(
     questions: list[Question],
     *,
-    test_title: str = "Test",
-    test_id:    str = "TEST001",
-    variant:    str = "A",
-    date:       str = "",
-    output:     str = "answer_sheet.pdf",
-) -> tuple[str, dict]:
+    test_title: str  = "Test",
+    test_id:    str  = "TEST001",
+    variant:    str  = "A",
+    date:       str  = "",
+    output:     str  = "answer_sheet.pdf",
+    shuffle:    bool = False,
+) -> tuple[str, dict, list[int], str]:
     """
     Generate an A4 answer sheet PDF.
-    Returns (output_path, capacity_info_dict).
+
+    shuffle=True  reorders questions for minimal page height via _optimal_order().
+    shuffle=False keeps the original question order.
+
+    Returns (output_path, capacity_info_dict, order, sheet_id) where:
+      order[k]  — original 1-based question number at sheet position k+1
+      sheet_id  — random hex token shared by all 4 corner QR codes;
+                  store it in your answer-key database to match scanned sheets.
     """
+    order = list(range(1, len(questions) + 1))
+    if shuffle:
+        questions, order = _optimal_order(questions)
+
     for q in questions:
         q.validate()
 
@@ -593,12 +747,16 @@ def generate(
             f"Questions overflow by {-cap['avail_mm']:.1f} mm — reduce question count."
         )
 
+    # Unique random token shared by all 4 corner QR codes on this sheet.
+    # QR content: TL<sheet_id>, TR<sheet_id>, BL<sheet_id>, BR<sheet_id>
+    sheet_id = secrets.token_urlsafe(21)  # ~28 alphanumeric chars, shared across all corners
+
     c = canvas.Canvas(output, pagesize=A4)
     c.setTitle(test_title)
     c.setAuthor("HVH Testing System")
 
     # 1. Corner QR codes
-    _draw_corner_qrs(c, test_id, variant)
+    _draw_corner_qrs(c, sheet_id)
 
     # 2. Student ID between top QRs
     _draw_student_id(c)
@@ -618,15 +776,32 @@ def generate(
             _draw_mcq_section(c, y, band['mcq'], band['mcq_q0'],
                               draw_w=band['mcq_draw_w'])
             if band['side_rows']:
-                _draw_numeric_panel(c, band['side_x'], y,
-                                    band['side_rows'], band['side_q0'])
+                # Narrow the numeric panel if MCQ follows it to the right
+                num_x_right = (band['side_x'] + band['side_num_nat_w']
+                               if band['side_mcq2'] else CR)
+                _draw_num_rows(c, band['side_x'], num_x_right, y,
+                               band['side_rows'], band['side_q0'])
+                if band['side_mcq2']:
+                    _draw_mcq_section(c, y, band['side_mcq2'], band['side_mcq2_q0'],
+                                      x_start=band['side_mcq2_x'])
         else:
-            _draw_numeric_section(c, y, band['num_rows'], band['num_q0'])
+            # Numeric section; optionally narrower when MCQ sits beside it
+            x_right = (CL + band['num_draw_w']) if band['side_mcq'] else None
+            _draw_numeric_section(c, y, band['num_rows'], band['num_q0'],
+                                  x_right=x_right)
+            if band['side_mcq']:
+                _draw_mcq_section(c, y, band['side_mcq'], band['side_mcq_q0'],
+                                  x_start=band['side_mcq_x'])
 
         y -= band['height'] + GRID_SEC_GAP
 
+    # Text centred between the bottom two QR codes
+    c.setFont("Helvetica", 10)
+    c.setFillColor(colors.black)
+    c.drawCentredString(PAGE_W / 2, QR_EDGE + QR_SIZE / 2 - 2 * mm, "This is test sentence, Ave")
+
     c.save()
-    return output, cap
+    return output, cap, order, sheet_id
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -660,7 +835,7 @@ if __name__ == "__main__":
         # Block 2 — Numeric (float with decimal point)
         NumericQuestion(n_digits=5, has_decimal=True,  decimal_pos=2),  # Q20  e.g. "12.345"
         NumericQuestion(n_digits=4, has_decimal=False),                  # Q21  e.g. "2026"
-        NumericQuestion(n_digits=6, has_decimal=True,  decimal_pos=3),  # Q22  e.g. "123.456"
+        NumericQuestion(n_digits=5, has_decimal=True,  decimal_pos=3),  # Q22  e.g. "123.456"
         NumericQuestion(n_digits=3, has_decimal=False),                  # Q23  e.g. "314"
         NumericQuestion(n_digits=4, has_decimal=True,  decimal_pos=1),  # Q24  e.g. "3.141"
         NumericQuestion(n_digits=5, has_decimal=False),                  # Q25  e.g. "12345"
@@ -711,13 +886,20 @@ if __name__ == "__main__":
 
     report_capacity(questions)
 
-    path, cap = generate(
+    path, cap, order, sheet_id = generate(
         questions,
         test_title = "Mathematics — Final Exam 2026",
         test_id    = "MATH2026A",
         variant    = "A",
         date       = "18 Aug 2026",
         output     = "answer_sheet.pdf",
+        shuffle    = True,          # set False to keep original order
     )
     print(f"Generated : {path}")
-    print(f"Remaining : ~{cap['rem_mcq_4']} MCQ-4  or  ~{cap['rem_numeric']} numeric\n")
+    print(f"Sheet ID  : {sheet_id}")
+    print(f"  TL{sheet_id} / TR{sheet_id} / BL{sheet_id} / BR{sheet_id}")
+    print(f"Remaining : ~{cap['rem_mcq_4']} MCQ-4  or  ~{cap['rem_numeric']} numeric")
+    print(f"Sheet order (original Q# → sheet position):")
+    for pos, orig in enumerate(order, 1):
+        print(f"  Sheet Q{pos:02d} ← original Q{orig:02d}")
+    print()
