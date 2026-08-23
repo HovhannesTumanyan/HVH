@@ -1,0 +1,17 @@
+# HVH Testing System — Python dependencies
+# Install with:  pip install -r requirements.txt
+#
+# scanner.py also needs the native zbar library:
+#   sudo apt install libzbar0        (Debian/Ubuntu)
+#   brew install zbar                (macOS)
+
+# PDF generation
+reportlab>=4.0
+
+# QR code generation (pulls in Pillow automatically)
+qrcode[pil]>=7.4
+
+# Scanner — image processing
+opencv-python>=4.8
+numpy>=1.24
+pyzbar>=0.1.9

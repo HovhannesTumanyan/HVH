@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""
+HVH Testing System — command-line interface.
+
+Generate a blank answer sheet and, optionally, a filled answer-key PDF.
+
+Usage examples
+--------------
+  # Blank sheet only
+  python3 main.py questions.txt
+
+  # Blank sheet + answer key
+  python3 main.py questions.txt --answers answers.txt
+
+  # Full options
+  python3 main.py questions.txt --answers answers.txt \\
+      --title "Mathematics Exam" --variant B --date 2026-08-24 \\
+      --output sheet.pdf --key-output key.pdf --shuffle
+
+Questions file format (one line per question)
+---------------------------------------------
+  4          → MCQ with 4 options  (a/b/c/d)
+  3          → MCQ with 3 options  (a/b/c)
+  n4         → Numeric, 4 digit boxes
+  n5.2       → Numeric, 5 digit boxes, decimal point after position 2
+
+  Lines starting with # or blank lines are ignored.
+
+Answers file format (one line per question, same order)
+-------------------------------------------------------
+  b          → MCQ: option b
+  a          → MCQ: option a
+  1234       → Numeric: 1234
+  12.345     → Numeric: 12.345  (for n5.2)
+
+  Lines starting with # or blank lines are ignored.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+from answer_sheet_gen import (
+    generate,
+    parse_questions_file,
+    parse_answers_file,
+    report_capacity,
+)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        prog="hvh",
+        description="HVH — generate answer sheets and answer keys",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument("questions",
+                   help="Questions definition file (.txt)")
+    p.add_argument("--answers", "-a", metavar="FILE",
+                   help="Answers file (.txt) — also generates a filled answer-key PDF")
+    p.add_argument("--title",   "-t", default="Test",
+                   help="Test title (default: Test)")
+    p.add_argument("--variant", "-v", default="A",
+                   help="Variant letter shown on the sheet (default: A)")
+    p.add_argument("--date",    "-d", default="",
+                   help="Date string shown on the sheet")
+    p.add_argument("--output",  "-o", default="answer_sheet.pdf",
+                   help="Output PDF for the blank answer sheet (default: answer_sheet.pdf)")
+    p.add_argument("--key-output", "-k", default=None, metavar="FILE",
+                   help="Output PDF for the answer key (default: key_<output>)")
+    p.add_argument("--shuffle", "-s", action="store_true",
+                   help="Reorder questions for a more compact layout")
+    p.add_argument("--capacity", "-c", action="store_true",
+                   help="Print a capacity report and exit without generating PDFs")
+
+    args = p.parse_args()
+
+    # ── Parse question file ──────────────────────────────────────────────────
+    try:
+        questions, file_shuffle = parse_questions_file(args.questions)
+    except Exception as e:
+        sys.exit(f"Error reading questions file: {e}")
+
+    shuffle = file_shuffle or args.shuffle   # CLI --shuffle can force True
+    print(f"Loaded {len(questions)} questions from '{args.questions}' (shuffle={shuffle})")
+
+    if args.capacity:
+        report_capacity(questions)
+        return
+
+    # ── Parse answers file (optional) ────────────────────────────────────────
+    answers = None
+    if args.answers:
+        try:
+            answers = parse_answers_file(args.answers, questions)
+        except Exception as e:
+            sys.exit(f"Error reading answers file: {e}")
+        print(f"Loaded {len(answers)} answers from '{args.answers}'")
+
+    common = dict(
+        test_title=args.title,
+        variant=args.variant,
+        date=args.date,
+        shuffle=shuffle,
+    )
+
+    # ── Generate blank answer sheet ──────────────────────────────────────────
+    try:
+        path, cap, order, sheet_id = generate(
+            questions, output=args.output, **common
+        )
+    except ValueError as e:
+        sys.exit(f"Layout error: {e}")
+
+    print(f"\nAnswer sheet : {path}")
+    print(f"Sheet ID     : {sheet_id}")
+    if args.shuffle:
+        print(f"Question order (sheet pos → original Q#):")
+        for pos, orig in enumerate(order, 1):
+            print(f"  Sheet Q{pos:02d} ← original Q{orig}")
+    if not cap["fits"]:
+        print(f"WARNING: overflow by {-cap['avail_mm']:.1f} mm")
+
+    # ── Generate answer key PDF ──────────────────────────────────────────────
+    if answers:
+        key_out = args.key_output or ("key_" + Path(args.output).name)
+        try:
+            key_path, _, _, _ = generate(
+                questions, output=key_out,
+                answers=answers, is_key=True,
+                **common,
+            )
+        except ValueError as e:
+            sys.exit(f"Key layout error: {e}")
+        print(f"Answer key   : {key_path}")
+
+
+if __name__ == "__main__":
+    main()

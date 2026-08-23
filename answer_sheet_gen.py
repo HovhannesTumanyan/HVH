@@ -62,6 +62,7 @@ _ID_ZONE_CY     = PAGE_H - QR_EDGE - QR_SIZE / 2   # vertical centre of top QR b
 
 # ── Header area (top of content rectangle) ────────────────────────────────────
 HEADER_H = 20 * mm            # title + name line + separator
+GUIDE_H  = 15 * mm            # instruction strip reserved at content-area bottom
 
 # ── MCQ grid ──────────────────────────────────────────────────────────────────
 # Target ~7 mm per column; with CW ≈ 198 mm that gives ~27 columns.
@@ -151,39 +152,47 @@ def _max_row_width(rows: list[list[tuple]]) -> float:
     max_w = 0.0
     for row in rows:
         if row:
-            last_q, last_x = row[-1]
+            last_q, last_x, _ = row[-1]
             max_w = max(max_w, last_x + NUM_Q_LBL_W + last_q.content_width())
     return max_w
 
 
 def _pack_rows(questions: list[NumericQuestion], width: float) -> list[list[tuple]]:
     """
-    Pack numeric questions into rows using best-fit: when a question doesn't fit
-    in the current row's remaining space, keep scanning for a smaller one that
-    does instead of immediately starting a new row.
-    Returns rows of (q, x_offset).
+    Pack numeric questions into rows using best-fit (skip-and-fill gaps).
+    Each entry is (q, x_offset, orig_idx) where orig_idx is the question's
+    position in the *input* list.  This lets drawing code assign the correct
+    label regardless of visual packing order.
     """
-    remaining = list(questions)
+    # remaining holds (orig_idx, q) so we can recover the original position
+    remaining: list[tuple[int, NumericQuestion]] = list(enumerate(questions))
     rows: list[list[tuple]] = []
 
     while remaining:
         row: list[tuple] = []
         x = 0.0
-        placed_indices: set[int] = set()
+        placed: set[int] = set()   # positions in `remaining` that were placed
 
-        for idx, q in enumerate(remaining):
-            q_w    = NUM_Q_LBL_W + q.content_width()
-            gap    = _NUM_Q_GAP if row else 0.0
+        for list_pos, (orig_idx, q) in enumerate(remaining):
+            q_w = NUM_Q_LBL_W + q.content_width()
+            gap = _NUM_Q_GAP if row else 0.0
             if x + gap + q_w <= width:
-                ox = x + gap
-                row.append((q, ox))
-                x = ox + q_w
-                placed_indices.add(idx)
+                row.append((q, x + gap, orig_idx))
+                x += gap + q_w
+                placed.add(list_pos)
 
-        remaining = [q for i, q in enumerate(remaining) if i not in placed_indices]
+        remaining = [item for pos, item in enumerate(remaining) if pos not in placed]
         if not row:
-            break   # nothing fits at all (safety)
-        rows.append(row)
+            break
+        # Sort by orig_idx so labels increase left-to-right even after gap-filling
+        row.sort(key=lambda t: t[2])
+        # Recompute x_offsets to match sorted visual order
+        reordered, x = [], 0.0
+        for q, _, orig_idx in row:
+            gap = _NUM_Q_GAP if reordered else 0.0
+            reordered.append((q, x + gap, orig_idx))
+            x += gap + NUM_Q_LBL_W + q.content_width()
+        rows.append(reordered)
 
     return rows
 
@@ -195,35 +204,40 @@ def _pack_in_panel(
 ) -> tuple[list[list[tuple]], int]:
     """
     Pack as many questions as fit in a panel of (panel_w × panel_h).
-    Uses best-fit within each row (skips questions too wide, fills gap with smaller ones).
-    Returns (rows, n_placed).  Stops when height is exhausted.
+    Returns (rows, n_placed) where each row entry is (q, x_offset, orig_idx).
     """
-    max_rows  = max(1, int(panel_h / NUM_ROW_H))
+    max_rows = max(1, int(panel_h / NUM_ROW_H))
     rows: list[list[tuple]] = []
-    eligible  = [q for q in questions if NUM_Q_LBL_W + q.content_width() <= panel_w]
-    remaining = list(eligible)
+    eligible = [(i, q) for i, q in enumerate(questions)
+                if NUM_Q_LBL_W + q.content_width() <= panel_w]
+    remaining = list(eligible)   # (orig_idx, q)
 
     while remaining and len(rows) < max_rows:
-        row = []
+        row: list[tuple] = []
         x = 0.0
-        placed_idx: set[int] = set()
+        placed: set[int] = set()
 
-        for idx, q in enumerate(remaining):
-            q_w  = NUM_Q_LBL_W + q.content_width()
-            gap  = _NUM_Q_GAP if row else 0.0
+        for list_pos, (orig_idx, q) in enumerate(remaining):
+            q_w = NUM_Q_LBL_W + q.content_width()
+            gap = _NUM_Q_GAP if row else 0.0
             if x + gap + q_w <= panel_w:
-                ox = x + gap
-                row.append((q, ox))
-                x = ox + q_w
-                placed_idx.add(idx)
+                row.append((q, x + gap, orig_idx))
+                x += gap + q_w
+                placed.add(list_pos)
 
-        remaining = [q for i, q in enumerate(remaining) if i not in placed_idx]
+        remaining = [item for pos, item in enumerate(remaining) if pos not in placed]
         if not row:
             break
-        rows.append(row)
+        row.sort(key=lambda t: t[2])
+        reordered, x = [], 0.0
+        for q, _, orig_idx in row:
+            gap = _NUM_Q_GAP if reordered else 0.0
+            reordered.append((q, x + gap, orig_idx))
+            x += gap + NUM_Q_LBL_W + q.content_width()
+        rows.append(reordered)
 
-    placed_qs = {id(q) for r in rows for q, _ in r}
-    n_placed = sum(1 for q in questions if id(q) in placed_qs)
+    placed_ids = {id(q) for r in rows for q, _, _ in r}
+    n_placed = sum(1 for q in questions if id(q) in placed_ids)
     return rows, n_placed
 
 
@@ -454,6 +468,120 @@ def report_capacity(questions: list[Question]) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# QUESTION / ANSWER FILE PARSING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def parse_questions_file(path: str) -> tuple[list[Question], bool]:
+    """
+    Parse a plain-text question definition file.
+
+    First non-blank, non-comment line must be True or False (shuffle flag).
+
+    Remaining lines (one question each):
+      2 / 3 / 4 / 5 / 6   → MCQQuestion with that many options
+      n3                   → NumericQuestion(n_digits=3)
+      n5.2                 → NumericQuestion(n_digits=5, has_decimal=True, decimal_pos=2)
+
+    Returns (questions, shuffle).
+    """
+    questions: list[Question] = []
+    shuffle: bool = False
+    shuffle_read = False
+
+    with open(path) as f:
+        for lineno, raw in enumerate(f, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            if not shuffle_read:
+                low = line.lower()
+                if low in ("true", "false"):
+                    shuffle = low == "true"
+                    shuffle_read = True
+                    continue
+                raise ValueError(
+                    f"{path}:{lineno}: first data line must be True or False (shuffle flag), got {line!r}"
+                )
+
+            low = line.lower()
+            try:
+                if low.startswith("n"):
+                    rest = low[1:]
+                    if "." in rest:
+                        n_str, dp_str = rest.split(".", 1)
+                        questions.append(NumericQuestion(
+                            n_digits=int(n_str),
+                            has_decimal=True,
+                            decimal_pos=int(dp_str),
+                        ))
+                    else:
+                        questions.append(NumericQuestion(n_digits=int(rest)))
+                else:
+                    questions.append(MCQQuestion(n_options=int(line)))
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"{path}:{lineno}: cannot parse {line!r} — {e}") from e
+
+    if not questions:
+        raise ValueError(f"{path}: no questions found")
+    return questions, shuffle
+
+
+def parse_answers_file(path: str, questions: list[Question]) -> dict[int, str]:
+    """
+    Parse a plain-text answer file into {1-based original question number → answer}.
+
+    Format (one answer per non-blank, non-comment line, same order as questions):
+      MCQ    : a / b / c / d / e / f  (case-insensitive)
+      Numeric: any digit string, e.g. 42  or  3.14
+    """
+    with open(path) as f:
+        lines = [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
+    answers: dict[int, str] = {}
+    for i, (q, ans) in enumerate(zip(questions, lines), 1):
+        if isinstance(q, MCQQuestion):
+            answers[i] = ans.lower()
+        else:
+            answers[i] = ans
+    return answers
+
+
+def _answer_to_boxes(ans_str: str, q: NumericQuestion) -> dict:
+    """
+    Map an answer string to per-box characters.
+
+    Returns {'digits': list[str], 'decimal': bool}
+      digits[d] — character to draw in digit box d (empty string = blank)
+      decimal   — True means draw '.' in the decimal box
+    """
+    digits = [""] * q.n_digits
+    decimal = False
+    ans_str = ans_str.strip()
+    if not ans_str:
+        return {"digits": digits, "decimal": decimal}
+
+    if q.has_decimal:
+        decimal = True
+        if "." in ans_str:
+            int_part, frac_part = ans_str.split(".", 1)
+        else:
+            int_part, frac_part = ans_str, ""
+        # integer part: right-align in [0 .. decimal_pos-1]
+        for i, ch in enumerate(int_part[-q.decimal_pos:].rjust(q.decimal_pos)):
+            digits[i] = ch if ch != " " else ""
+        # fractional part: left-align in [decimal_pos .. n_digits-1]
+        frac_slots = q.n_digits - q.decimal_pos
+        for i, ch in enumerate((frac_part + " " * frac_slots)[:frac_slots]):
+            digits[q.decimal_pos + i] = ch if ch != " " else ""
+    else:
+        # right-align in all slots
+        for i, ch in enumerate(ans_str[-q.n_digits:].rjust(q.n_digits)):
+            digits[i] = ch if ch != " " else ""
+
+    return {"digits": digits, "decimal": decimal}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # QR CODE HELPER
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -548,11 +676,13 @@ def _draw_mcq_section(c: canvas.Canvas, y_top: float,
                       questions: list[MCQQuestion],
                       q_start: int, *,
                       draw_w: float = None,
-                      x_start: float = None) -> float:
+                      x_start: float = None,
+                      q_answers: dict = None) -> float:
     """
     Draw one MCQ grid section.
-    draw_w : explicit width (defaults to CW or distance to CR from x_start).
-    x_start: left edge (defaults to CL); used when placed beside numeric.
+    draw_w   : explicit width (defaults to CW or distance to CR from x_start).
+    x_start  : left edge (defaults to CL); used when placed beside numeric.
+    q_answers: {sheet_q_num → answer_str} — fills the selected option black.
     Returns height consumed.
     """
     max_opts = max(q.n_options for q in questions)
@@ -593,7 +723,11 @@ def _draw_mcq_section(c: canvas.Canvas, y_top: float,
             bh = side
 
             if opt_i < q.n_options:
-                c.setFillColor(colors.white)
+                selected = (q_answers or {}).get(q_start + q_i, "").lower()
+                if selected == opts[opt_i]:
+                    c.setFillColor(colors.black)   # filled = correct answer
+                else:
+                    c.setFillColor(colors.white)
                 c.setStrokeColor(colors.black)
                 c.setLineWidth(0.5)
             else:
@@ -637,11 +771,11 @@ def _draw_mcq_section(c: canvas.Canvas, y_top: float,
 
 
 def _draw_num_rows(c: canvas.Canvas, x_left: float, x_right: float,
-                   y_top: float, rows: list, q_start: int) -> float:
+                   y_top: float, rows: list, q_start: int,
+                   q_answers: dict = None) -> float:
     """
     Shared helper: draw pre-packed numeric rows inside a border.
-    x_left/x_right define the bounding box (for border + row separators).
-    Rows are list of [(question, x_offset_from_x_left), ...].
+    q_answers: {sheet_q_num → answer_str} — writes digits into each box.
     Returns height consumed.
     """
     total_h = len(rows) * NUM_ROW_H
@@ -651,7 +785,6 @@ def _draw_num_rows(c: canvas.Canvas, x_left: float, x_right: float,
     c.setLineWidth(0.7)
     c.rect(x_left, y_top - total_h, box_w, total_h, stroke=1, fill=0)
 
-    q_counter = 0
     for row_idx, row in enumerate(rows):
         row_y   = y_top - row_idx * NUM_ROW_H
         box_top = row_y - (NUM_ROW_H - NUM_BOX_H) / 2 - NUM_BOX_H
@@ -661,25 +794,35 @@ def _draw_num_rows(c: canvas.Canvas, x_left: float, x_right: float,
             c.setLineWidth(0.25)
             c.line(x_left, row_y, x_right, row_y)
 
-        for q, x_off in row:
+        for q, x_off, orig_idx in row:
+            q_num = q_start + orig_idx
             col_x = x_left + x_off
 
             c.setFont("Helvetica-Bold", 7.5)
             c.setFillColor(colors.black)
             c.drawString(col_x + 1.5 * mm,
                          box_top + NUM_BOX_H / 2 - 2.5 * mm,
-                         f"{q_start + q_counter}.")
+                         f"{q_num}.")
+
+            box_data = None
+            if q_answers and q_num in q_answers:
+                box_data = _answer_to_boxes(q_answers[q_num], q)
 
             bx = col_x + NUM_Q_LBL_W
+            char_y = box_top + (NUM_BOX_H - 3.5 * mm) / 2   # baseline for answer chars
+
             for d in range(q.n_digits):
                 if q.has_decimal and d == q.decimal_pos:
-                    # Writable decimal-point box — student writes "."
                     c.setFillColor(colors.white)
                     c.setStrokeColor(colors.black)
                     c.setLineWidth(0.5)
                     c.setDash([1, 4])
                     c.rect(bx, box_top, NUM_DOT_BOX_W, NUM_BOX_H, stroke=1, fill=1)
                     c.setDash([])
+                    if box_data and box_data["decimal"]:
+                        c.setFont("Helvetica-Bold", 11)
+                        c.setFillColor(colors.black)
+                        c.drawCentredString(bx + NUM_DOT_BOX_W / 2, char_y, ".")
                     bx += NUM_DOT_BOX_W + NUM_BOX_GAP
 
                 c.setFillColor(colors.white)
@@ -688,25 +831,137 @@ def _draw_num_rows(c: canvas.Canvas, x_left: float, x_right: float,
                 c.setDash([1, 4])
                 c.rect(bx, box_top, NUM_BOX_W, NUM_BOX_H, stroke=1, fill=1)
                 c.setDash([])
+                if box_data:
+                    ch = box_data["digits"][d] if d < len(box_data["digits"]) else ""
+                    if ch:
+                        c.setFont("Helvetica-Bold", 11)
+                        c.setFillColor(colors.black)
+                        c.drawCentredString(bx + NUM_BOX_W / 2, char_y, ch)
                 bx += NUM_BOX_W + NUM_BOX_GAP
-
-            q_counter += 1
 
     return total_h
 
 
 def _draw_numeric_section(c: canvas.Canvas, y_top: float,
                           rows: list, q_start: int,
-                          x_right: float = None) -> float:
+                          x_right: float = None,
+                          q_answers: dict = None) -> float:
     """Full-width (or right-bounded) numeric section from pre-packed rows."""
     return _draw_num_rows(c, CL, x_right if x_right is not None else CR,
-                          y_top, rows, q_start)
+                          y_top, rows, q_start, q_answers)
 
 
 def _draw_numeric_panel(c: canvas.Canvas, x_left: float, y_top: float,
-                        rows: list, q_start: int) -> None:
+                        rows: list, q_start: int,
+                        q_answers: dict = None) -> None:
     """Numeric side panel beside an MCQ section (pre-packed rows)."""
-    _draw_num_rows(c, x_left, CR, y_top, rows, q_start)
+    _draw_num_rows(c, x_left, CR, y_top, rows, q_start, q_answers)
+
+
+def _guide_label(c: canvas.Canvas, cx: float, y: float,
+                 text: str, *, bad: bool) -> None:
+    c.setFont("Helvetica-Bold", 7.5)
+    if bad:
+        c.setFillColorRGB(0.75, 0.1, 0.1)
+    else:
+        c.setFillColorRGB(0.1, 0.55, 0.1)
+    c.drawCentredString(cx, y, text)
+
+
+def _draw_guide(c: canvas.Canvas) -> None:
+    """
+    Instruction strip drawn between the two bottom corner QR codes.
+
+    Available region (portrait A4, origin bottom-left):
+      x : QR_EDGE+QR_SIZE … PAGE_W-QR_EDGE-QR_SIZE  ≈ 28 … 182 mm  (154 mm wide)
+      y : QR_EDGE          … QR_EDGE+QR_SIZE          ≈  6 … 28 mm  (22 mm tall)
+    """
+    # Band geometry
+    gx_l = QR_EDGE + QR_SIZE                    # ≈ 28 mm from left
+    gx_r = PAGE_W - QR_EDGE - QR_SIZE           # ≈ 182 mm from left
+    gy_b = QR_EDGE                              # 6 mm from bottom
+    gy_t = QR_EDGE + QR_SIZE                   # 28 mm from bottom
+    gcy  = (gy_b + gy_t) / 2                   # vertical centre ≈ 17 mm
+
+    _PAD  = 2.5 * mm
+    box_s = min(GRID_Q_W, GRID_OPT_H) - 1.4 * mm   # real MCQ box side ≈ 3.6 mm
+
+    # Row positions inside the 22 mm band
+    lbl_y = gcy + 4.5 * mm    # label baseline (upper row)
+    ex_y  = gcy - box_s - 1.2 * mm  # checkbox baseline (lower row)
+
+    # ── Left section: MCQ marking examples ──────────────────────────────────
+    c.setFont("Helvetica-Bold", 6.5)
+    c.setFillColorRGB(0.25, 0.25, 0.25)
+    c.drawString(gx_l + _PAD, lbl_y, "MARK ANSWER:")
+
+    ex_x = gx_l + _PAD + 28 * mm
+
+    # Wrong ①: dot — barely touched
+    c.setFillColor(colors.white)
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(0.5)
+    c.rect(ex_x, ex_y, box_s, box_s, stroke=1, fill=1)
+    c.setFillColor(colors.black)
+    c.circle(ex_x + box_s / 2, ex_y + box_s / 2, 0.55 * mm, stroke=0, fill=1)
+    _guide_label(c, ex_x + box_s / 2, ex_y - 3.0 * mm, "✗", bad=True)
+
+    # Wrong ②: X-mark
+    ex_x += box_s + 5 * mm
+    c.setFillColor(colors.white)
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(0.5)
+    c.rect(ex_x, ex_y, box_s, box_s, stroke=1, fill=1)
+    m = 0.65 * mm
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(0.9)
+    c.line(ex_x + m,         ex_y + m,         ex_x + box_s - m, ex_y + box_s - m)
+    c.line(ex_x + box_s - m, ex_y + m,         ex_x + m,         ex_y + box_s - m)
+    _guide_label(c, ex_x + box_s / 2, ex_y - 3.0 * mm, "✗", bad=True)
+
+    # Correct: completely filled black
+    ex_x += box_s + 5 * mm
+    c.setFillColor(colors.black)
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(0.5)
+    c.rect(ex_x, ex_y, box_s, box_s, stroke=1, fill=1)
+    _guide_label(c, ex_x + box_s / 2, ex_y - 3.0 * mm, "✓", bad=False)
+
+    # Vertical divider
+    div_x = gx_l + 66 * mm
+    c.setStrokeColorRGB(0.65, 0.65, 0.65)
+    c.setLineWidth(0.3)
+    c.line(div_x, gy_b + 2 * mm, div_x, gy_t - 2 * mm)
+
+    # ── Right section: digit writing examples 0–9 ───────────────────────────
+    sec_x = div_x + _PAD
+
+    c.setFont("Helvetica-Bold", 6.5)
+    c.setFillColorRGB(0.25, 0.25, 0.25)
+    c.drawString(sec_x, lbl_y, "WRITE NUMBERS CLEARLY:")
+
+    # Digit boxes: scaled to fit the 22 mm band height
+    sc      = 0.82
+    dw      = NUM_BOX_W * sc
+    dh      = NUM_BOX_H * sc          # ≈ 6.6 mm
+    dgap    = 0.5 * mm
+    dbox_y  = gcy - dh / 2 - 0.5 * mm
+
+    total_box_w = 10 * dw + 9 * dgap
+    digits_x0 = gx_r - total_box_w - 1.5 * mm   # right-align, 1.5 mm gap before QR
+    for d in range(10):
+        bx = digits_x0 + d * (dw + dgap)
+        c.setFillColor(colors.white)
+        c.setStrokeColor(colors.black)
+        c.setLineWidth(0.45)
+        c.setDash([1, 3])
+        c.rect(bx, dbox_y, dw, dh, stroke=1, fill=1)
+        c.setDash([])
+        c.setFont("Helvetica-Bold", 9.5)
+        c.setFillColor(colors.black)
+        c.drawCentredString(bx + dw / 2,
+                            dbox_y + (dh - 3.5 * mm) / 2,
+                            str(d))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -722,17 +977,17 @@ def generate(
     date:       str  = "",
     output:     str  = "answer_sheet.pdf",
     shuffle:    bool = False,
+    answers:    dict = None,   # {original 1-based q# → answer str}; fills key PDF
+    is_key:     bool = False,  # True → add "ANSWER KEY" label to header
 ) -> tuple[str, dict, list[int], str]:
     """
     Generate an A4 answer sheet PDF.
 
-    shuffle=True  reorders questions for minimal page height via _optimal_order().
-    shuffle=False keeps the original question order.
+    answers=dict  : if given, every answer is drawn filled in — use for the key.
+    is_key=True   : appends "— ANSWER KEY" to the PDF title.
+    shuffle=True  : reorders questions for minimal page height.
 
-    Returns (output_path, capacity_info_dict, order, sheet_id) where:
-      order[k]  — original 1-based question number at sheet position k+1
-      sheet_id  — random hex token shared by all 4 corner QR codes;
-                  store it in your answer-key database to match scanned sheets.
+    Returns (output_path, capacity_info_dict, order, sheet_id).
     """
     order = list(range(1, len(questions) + 1))
     if shuffle:
@@ -747,12 +1002,18 @@ def generate(
             f"Questions overflow by {-cap['avail_mm']:.1f} mm — reduce question count."
         )
 
-    # Unique random token shared by all 4 corner QR codes on this sheet.
-    # QR content: TL<sheet_id>, TR<sheet_id>, BL<sheet_id>, BR<sheet_id>
-    sheet_id = secrets.token_urlsafe(21)  # ~28 alphanumeric chars, shared across all corners
+    # Map original q# → answer to sheet q# → answer using the order array.
+    sheet_answers: dict = {}
+    if answers:
+        for sheet_pos, orig_q in enumerate(order, 1):
+            if orig_q in answers:
+                sheet_answers[sheet_pos] = answers[orig_q]
 
+    sheet_id = secrets.token_urlsafe(21)
+
+    pdf_title = test_title + (" — ANSWER KEY" if is_key else "")
     c = canvas.Canvas(output, pagesize=A4)
-    c.setTitle(test_title)
+    c.setTitle(pdf_title)
     c.setAuthor("HVH Testing System")
 
     # 1. Corner QR codes
@@ -761,47 +1022,172 @@ def generate(
     # 2. Student ID between top QRs
     _draw_student_id(c)
 
-    # 3. Outer content border (exactly at content edges, no overshoot)
+    # 3. Outer content border
     c.setStrokeColor(colors.black)
     c.setLineWidth(0.8)
     c.rect(CL, CB, CW, CH, stroke=1, fill=0)
 
-    # 4. Header
+    # 4. Header  (answer key gets a red "ANSWER KEY" stamp)
     _draw_header(c, test_title, variant, date)
+    if is_key:
+        c.setFont("Helvetica-Bold", 9)
+        c.setFillColorRGB(0.75, 0.1, 0.1)
+        c.drawRightString(CR - 3 * mm, CT - 5 * mm, "ANSWER KEY")
 
-    # 5. Question sections — driven by the layout plan
+    # 5. Question sections
+    qa = sheet_answers or None
     y = CT - HEADER_H
     for band in _plan_layout(questions):
         if band['kind'] == 'mcq':
             _draw_mcq_section(c, y, band['mcq'], band['mcq_q0'],
-                              draw_w=band['mcq_draw_w'])
+                              draw_w=band['mcq_draw_w'], q_answers=qa)
             if band['side_rows']:
-                # Narrow the numeric panel if MCQ follows it to the right
                 num_x_right = (band['side_x'] + band['side_num_nat_w']
                                if band['side_mcq2'] else CR)
                 _draw_num_rows(c, band['side_x'], num_x_right, y,
-                               band['side_rows'], band['side_q0'])
+                               band['side_rows'], band['side_q0'], qa)
                 if band['side_mcq2']:
                     _draw_mcq_section(c, y, band['side_mcq2'], band['side_mcq2_q0'],
-                                      x_start=band['side_mcq2_x'])
+                                      x_start=band['side_mcq2_x'], q_answers=qa)
         else:
-            # Numeric section; optionally narrower when MCQ sits beside it
             x_right = (CL + band['num_draw_w']) if band['side_mcq'] else None
             _draw_numeric_section(c, y, band['num_rows'], band['num_q0'],
-                                  x_right=x_right)
+                                  x_right=x_right, q_answers=qa)
             if band['side_mcq']:
                 _draw_mcq_section(c, y, band['side_mcq'], band['side_mcq_q0'],
-                                  x_start=band['side_mcq_x'])
+                                  x_start=band['side_mcq_x'], q_answers=qa)
 
         y -= band['height'] + GRID_SEC_GAP
 
-    # Text centred between the bottom two QR codes
-    c.setFont("Helvetica", 10)
-    c.setFillColor(colors.black)
-    c.drawCentredString(PAGE_W / 2, QR_EDGE + QR_SIZE / 2 - 2 * mm, "This is test sentence, Ave")
+    # Instruction strip between the bottom QR codes
+    _draw_guide(c)
 
     c.save()
+
+    # Export box layout JSON (blank sheet only)
+    if not is_key:
+        layout_json = output.replace(".pdf", "_layout.json")
+        export_layout_json(questions, layout_json, sheet_id=sheet_id)
+
     return output, cap, order, sheet_id
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYOUT EXPORT  (box positions for the scanner)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def export_layout_json(questions: list[Question], path: str, sheet_id: str = "") -> None:
+    """
+    Write all MCQ checkbox and numeric digit box positions to a JSON file.
+
+    Coordinate system: mm from top-left corner of the A4 page (y increases down).
+    This matches what scanner.py expects after perspective-warping the photo.
+    """
+    import json as _json
+
+    # ReportLab uses points with origin at bottom-left.
+    # Convert:  x_mm = x_pt / mm
+    #           y_mm_from_top = PAGE_H_mm - y_pt / mm
+    PAGE_H_MM = PAGE_H / mm   # 297.0
+
+    def _pt_to_mm(x_pt: float, y_pt: float, w_pt: float, h_pt: float) -> dict:
+        """Convert a ReportLab rect (bottom-left origin, points) to top-left-origin mm."""
+        return {
+            "x_mm": x_pt / mm,
+            "y_mm": PAGE_H_MM - (y_pt + h_pt) / mm,
+            "w_mm": w_pt / mm,
+            "h_mm": h_pt / mm,
+        }
+
+    mcq_boxes: list[dict] = []
+    num_boxes: list[dict] = []
+
+    y = CT - HEADER_H   # same starting y as generate()
+
+    for band in _plan_layout(questions):
+        if band["kind"] == "mcq":
+            # ── main MCQ grid ──────────────────────────────────────────────
+            _collect_mcq_boxes(mcq_boxes, band["mcq"], band["mcq_q0"],
+                               x0=CL, y_top=y, _pt_to_mm=_pt_to_mm)
+
+            if band["side_rows"]:
+                # numeric side panel
+                num_x_right = (band["side_x"] + band["side_num_nat_w"]
+                               if band["side_mcq2"] else CR)
+                _collect_num_boxes(num_boxes, band["side_rows"], band["side_q0"],
+                                   x_left=band["side_x"], y_top=y, _pt_to_mm=_pt_to_mm)
+                if band["side_mcq2"]:
+                    _collect_mcq_boxes(mcq_boxes, band["side_mcq2"], band["side_mcq2_q0"],
+                                       x0=band["side_mcq2_x"], y_top=y, _pt_to_mm=_pt_to_mm)
+        else:
+            # ── numeric section ────────────────────────────────────────────
+            _collect_num_boxes(num_boxes, band["num_rows"], band["num_q0"],
+                               x_left=CL, y_top=y, _pt_to_mm=_pt_to_mm)
+            if band["side_mcq"]:
+                _collect_mcq_boxes(mcq_boxes, band["side_mcq"], band["side_mcq_q0"],
+                                   x0=band["side_mcq_x"], y_top=y, _pt_to_mm=_pt_to_mm)
+
+        y -= band["height"] + GRID_SEC_GAP
+
+    data = {
+        "sheet_id":  sheet_id,
+        "page_w_mm": PAGE_W / mm,
+        "page_h_mm": PAGE_H / mm,
+        "mcq_boxes": mcq_boxes,
+        "num_boxes": num_boxes,
+    }
+    with open(path, "w") as f:
+        _json.dump(data, f, indent=2)
+
+
+def _collect_mcq_boxes(out: list, questions: list, q_start: int,
+                       x0: float, y_top: float, _pt_to_mm) -> None:
+    """Collect MCQ checkbox positions (same geometry as _draw_mcq_section)."""
+    max_opts = max(q.n_options for q in questions)
+    for opt_i in range(max_opts):
+        row_top = y_top - GRID_NUM_H - opt_i * GRID_OPT_H
+        row_bot = row_top - GRID_OPT_H
+        for q_i, q in enumerate(questions):
+            if opt_i >= q.n_options:
+                continue   # greyed-out cell — not a real checkbox
+            cell_x = x0 + GRID_LBL_W + q_i * GRID_Q_W
+            side   = min(GRID_Q_W, GRID_OPT_H) - 1.4 * mm
+            bx     = cell_x + (GRID_Q_W   - side) / 2
+            by_    = row_bot + (GRID_OPT_H - side) / 2
+            box    = _pt_to_mm(bx, by_, side, side)
+            box["q"]   = q_start + q_i
+            box["opt"] = "abcdef"[opt_i]
+            out.append(box)
+
+
+def _collect_num_boxes(out: list, rows: list, q_start: int,
+                       x_left: float, y_top: float, _pt_to_mm) -> None:
+    """Collect numeric digit/decimal box positions (same geometry as _draw_num_rows)."""
+    for row_idx, row in enumerate(rows):
+        row_y   = y_top - row_idx * NUM_ROW_H
+        box_top = row_y - (NUM_ROW_H - NUM_BOX_H) / 2 - NUM_BOX_H
+
+        for q, x_off, orig_idx in row:
+            q_num = q_start + orig_idx
+            bx = x_left + x_off + NUM_Q_LBL_W
+            digit_idx = 0
+            for d in range(q.n_digits):
+                if q.has_decimal and d == q.decimal_pos:
+                    box = _pt_to_mm(bx, box_top, NUM_DOT_BOX_W, NUM_BOX_H)
+                    box["q"]          = q_num
+                    box["digit"]      = digit_idx
+                    box["is_decimal"] = True
+                    out.append(box)
+                    bx += NUM_DOT_BOX_W + NUM_BOX_GAP
+                    digit_idx += 1
+
+                box = _pt_to_mm(bx, box_top, NUM_BOX_W, NUM_BOX_H)
+                box["q"]          = q_num
+                box["digit"]      = digit_idx
+                box["is_decimal"] = False
+                out.append(box)
+                bx += NUM_BOX_W + NUM_BOX_GAP
+                digit_idx += 1
 
 
 # ══════════════════════════════════════════════════════════════════════════════
