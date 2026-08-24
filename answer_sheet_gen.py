@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import qrcode
+from PIL import Image as _PILImage, ImageDraw as _PILDraw, ImageFilter as _PILFilter
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -868,6 +869,83 @@ def _guide_label(c: canvas.Canvas, cx: float, y: float,
     c.drawCentredString(cx, y, text)
 
 
+# Stroke paths for handwritten-style digits 0-9.
+# Each digit is a list of strokes; each stroke is (x, y) tuples
+# in normalised [0,1]² space where (0,0) = bottom-left, (1,1) = top-right.
+_DIGIT_STROKES: dict[int, list[list[tuple[float, float]]]] = {
+    0: [[(0.50,0.06),(0.24,0.08),(0.08,0.26),(0.06,0.50),
+         (0.08,0.74),(0.24,0.92),(0.50,0.94),
+         (0.76,0.92),(0.92,0.74),(0.94,0.50),
+         (0.92,0.26),(0.76,0.08),(0.50,0.06)]],
+
+    1: [[(0.32,0.76),(0.50,0.94),(0.50,0.06)]],
+
+    2: [[(0.20,0.74),(0.22,0.88),(0.38,0.94),(0.60,0.92),
+         (0.78,0.80),(0.80,0.64),(0.70,0.52),(0.52,0.42),
+         (0.18,0.06),(0.82,0.06)]],
+
+    3: [[(0.20,0.88),(0.50,0.94),(0.76,0.82),(0.76,0.64),
+         (0.56,0.54),(0.50,0.50),(0.58,0.46),(0.78,0.34),
+         (0.76,0.16),(0.50,0.06),(0.22,0.14)]],
+
+    4: [[(0.68,0.94),(0.68,0.06)],
+        [(0.68,0.94),(0.14,0.38),(0.84,0.38)]],
+
+    5: [[(0.78,0.94),(0.22,0.94),(0.18,0.54),
+         (0.46,0.60),(0.72,0.54),(0.82,0.36),
+         (0.76,0.14),(0.50,0.06),(0.20,0.14)]],
+
+    6: [[(0.74,0.90),(0.46,0.96),(0.20,0.78),(0.12,0.50),
+         (0.12,0.28),(0.24,0.10),(0.50,0.04),(0.76,0.12),
+         (0.86,0.34),(0.78,0.54),(0.50,0.62),
+         (0.22,0.54),(0.12,0.34)]],
+
+    7: [[(0.16,0.94),(0.84,0.94),(0.38,0.06)]],
+
+    8: [[(0.50,0.50),(0.24,0.56),(0.14,0.72),(0.20,0.88),
+         (0.50,0.94),(0.80,0.88),(0.86,0.72),(0.76,0.56),
+         (0.50,0.50),(0.28,0.44),(0.14,0.26),(0.20,0.10),
+         (0.50,0.04),(0.80,0.10),(0.86,0.28),(0.74,0.44),(0.50,0.50)]],
+
+    9: [[(0.82,0.60),(0.82,0.06)],
+        [(0.82,0.60),(0.70,0.88),(0.46,0.96),(0.20,0.84),
+         (0.14,0.62),(0.22,0.40),(0.48,0.34),
+         (0.70,0.42),(0.82,0.62)]],
+}
+
+
+def _mnist_digit_image(digit: int, w_mm: float, h_mm: float) -> ImageReader:
+    """Render digit as an MNIST-style thick-stroke image and return an ImageReader."""
+    dpi   = 220
+    w_px  = max(24, int(w_mm / 25.4 * dpi))
+    h_px  = max(32, int(h_mm / 25.4 * dpi))
+    sw    = max(3, int(min(w_px, h_px) * 0.14))   # stroke width
+
+    img  = _PILImage.new("L", (w_px, h_px), 255)
+    draw = _PILDraw.Draw(img)
+
+    pad_x = w_px * 0.12
+    pad_y = h_px * 0.06
+    dw    = w_px - 2 * pad_x
+    dh    = h_px - 2 * pad_y
+
+    for stroke in _DIGIT_STROKES[digit]:
+        pts = [
+            (int(pad_x + x * dw), int(h_px - pad_y - y * dh))
+            for x, y in stroke
+        ]
+        if len(pts) >= 2:
+            draw.line(pts, fill=30, width=sw)
+
+    img = img.filter(_PILFilter.GaussianBlur(radius=sw * 0.45))
+    img = img.convert("RGB")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return ImageReader(buf)
+
+
 def _draw_guide(c: canvas.Canvas) -> None:
     """
     Instruction strip drawn between the two bottom corner QR codes.
@@ -957,11 +1035,8 @@ def _draw_guide(c: canvas.Canvas) -> None:
         c.setDash([1, 3])
         c.rect(bx, dbox_y, dw, dh, stroke=1, fill=1)
         c.setDash([])
-        c.setFont("Helvetica-Bold", 9.5)
-        c.setFillColor(colors.black)
-        c.drawCentredString(bx + dw / 2,
-                            dbox_y + (dh - 3.5 * mm) / 2,
-                            str(d))
+        digit_img = _mnist_digit_image(d, dw / mm, dh / mm)
+        c.drawImage(digit_img, bx, dbox_y, width=dw, height=dh, mask="auto")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1009,7 +1084,7 @@ def generate(
             if orig_q in answers:
                 sheet_answers[sheet_pos] = answers[orig_q]
 
-    sheet_id = secrets.token_urlsafe(21)
+    sheet_id = secrets.token_urlsafe(9)[:9]   # 9-char id → QR = "TL" + 9 = 11 chars
 
     pdf_title = test_title + (" — ANSWER KEY" if is_key else "")
     c = canvas.Canvas(output, pagesize=A4)
