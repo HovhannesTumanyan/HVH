@@ -1204,12 +1204,25 @@ def export_layout_json(questions: list[Question], path: str, sheet_id: str = "")
 
         y -= band["height"] + GRID_SEC_GAP
 
+    # ── Student ID boxes ──────────────────────────────────────────────────────
+    id_start_x = (_ID_ZONE_L + _ID_ZONE_R - _ID_STRIP_W) / 2
+    id_box_y   = _ID_ZONE_CY - ID_BOX_H / 2
+    id_boxes = [
+        {
+            **_pt_to_mm(id_start_x + i * (ID_BOX_W + ID_BOX_GAP),
+                        id_box_y, ID_BOX_W, ID_BOX_H),
+            "digit": i + 1,
+        }
+        for i in range(ID_BOXES)
+    ]
+
     data = {
         "sheet_id":  sheet_id,
         "page_w_mm": PAGE_W / mm,
         "page_h_mm": PAGE_H / mm,
         "mcq_boxes": mcq_boxes,
         "num_boxes": num_boxes,
+        "id_boxes":  id_boxes,
     }
     with open(path, "w") as f:
         _json.dump(data, f, indent=2)
