@@ -273,7 +273,10 @@ def _preprocess(inv: np.ndarray) -> "torch.Tensor":
     return (t - 0.1736) / 0.3317
 
 
-def read_digit(region: np.ndarray, model) -> tuple[str, float]:
+DIGIT_BLANK_REL = 0.08   # relative-darkness below this → digit box is empty
+
+def read_digit(region: np.ndarray, model,
+               page_white: float = 200.0) -> tuple[str, float]:
     """
     Predict the handwritten digit in *region* using TTA.
     Returns:
@@ -283,6 +286,11 @@ def read_digit(region: np.ndarray, model) -> tuple[str, float]:
     """
     import torch, torch.nn.functional as F
     import torchvision.transforms.functional as TF
+
+    # Relative-darkness check first: avoids Otsu splitting a light/empty box
+    # into ~50% "dark" pixels which the CNN then misclassifies as "8".
+    if relative_darkness(region, page_white) < DIGIT_BLANK_REL:
+        return "", 0.0
 
     gray   = _to_gray(region)
     _, inv = cv2.threshold(gray, 0, 255,
@@ -343,7 +351,7 @@ def read_all_boxes(
         region = extract_region(warped, b["x_mm"], b["y_mm"],
                                 b["w_mm"], b["h_mm"], scale)
         if digit_model is not None:
-            d, _ = read_digit(region, digit_model)
+            d, _ = read_digit(region, digit_model, page_white)
             id_digits.append(d)
         else:
             id_digits.append("?" if relative_darkness(region, page_white) > BLANK_THRESHOLD else "")
@@ -395,7 +403,7 @@ def read_all_boxes(
         else:
             pos = b["digit"]   # 1-based digit position within the question
             if digit_model is not None:
-                d, conf = read_digit(region, digit_model)
+                d, conf = read_digit(region, digit_model, page_white)
             else:
                 ratio = relative_darkness(region, page_white)
                 d = "?" if ratio > BLANK_THRESHOLD else ""
