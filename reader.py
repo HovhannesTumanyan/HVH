@@ -175,33 +175,43 @@ def _mixup(X, y, alpha=0.2):
     return lam * X + (1 - lam) * X[idx], y, y[idx], lam
 
 
+def _add_noise(tensor):
+    """Gaussian noise augmentation to simulate photo/scan grain."""
+    import torch
+    noise = torch.randn_like(tensor) * 0.15
+    return (tensor + noise).clamp(-3.0, 3.0)
+
+
 def _train_and_save() -> None:
     import torch
     from torch.utils.data import DataLoader, ConcatDataset
     from torchvision import datasets, transforms
     import torch.optim as optim
 
-    print("Training digit model on MNIST + EMNIST (~350k samples, 5 epochs)…")
-    print("This runs once and saves digit_model.pt — takes ~5–10 min on CPU.\n")
+    EPOCHS = 2
+    print(f"Training digit model on MNIST + EMNIST (~350k samples, {EPOCHS} epochs)…")
+    print("Augmentations: rotation±10°, brightness, noise, affine, elastic.\n")
 
     NORM = transforms.Normalize((0.1736,), (0.3317,))
 
-    train_tf_mnist = transforms.Compose([
-        transforms.RandomAffine(degrees=12, translate=(0.12, 0.12),
-                                scale=(0.82, 1.18), shear=8),
-        transforms.ToTensor(), NORM,
+    # Photo-realistic augmentations: rotation, brightness, noise simulate
+    # scanned/photographed answer sheets under varying lighting.
+    train_aug = transforms.Compose([
+        transforms.RandomAffine(degrees=10, translate=(0.12, 0.12),
+                                scale=(0.85, 1.15), shear=6),
+        transforms.ColorJitter(brightness=0.4),   # lighting variation
+        transforms.ToTensor(),
+        NORM,
+        transforms.Lambda(_add_noise),            # sensor/scan noise
     ])
+    train_tf_mnist  = train_aug
     train_tf_emnist = transforms.Compose([
         transforms.Lambda(_emnist_fix),
-        transforms.RandomAffine(degrees=12, translate=(0.12, 0.12),
-                                scale=(0.82, 1.18), shear=8),
-        transforms.ToTensor(), NORM,
+        *train_aug.transforms,
     ])
-    val_tf_emnist = transforms.Compose([
-        transforms.Lambda(_emnist_fix),
-        transforms.ToTensor(), NORM,
-    ])
-    val_tf_mnist = transforms.Compose([transforms.ToTensor(), NORM])
+    val_tf_emnist = transforms.Compose([transforms.Lambda(_emnist_fix),
+                                        transforms.ToTensor(), NORM])
+    val_tf_mnist  = transforms.Compose([transforms.ToTensor(), NORM])
 
     mnist_train  = datasets.MNIST(str(MNIST_DIR),  train=True,  download=True, transform=train_tf_mnist)
     emnist_train = datasets.EMNIST(str(MNIST_DIR), split="digits", train=True,  download=True, transform=train_tf_emnist)
@@ -216,15 +226,14 @@ def _train_and_save() -> None:
     model   = _build_model()
     opt     = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     sched   = optim.lr_scheduler.OneCycleLR(opt, max_lr=3e-3,
-                                             epochs=5,
+                                             epochs=EPOCHS,
                                              steps_per_epoch=len(train_loader))
     loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.05)
 
     best_acc = 0.0
-    for epoch in range(5):
+    for epoch in range(EPOCHS):
         model.train()
         for X, y in train_loader:
-            # MixUp
             Xm, ya, yb, lam = _mixup(X, y)
             opt.zero_grad()
             out  = model(Xm)
@@ -241,12 +250,12 @@ def _train_and_save() -> None:
                 total   += len(y)
         acc = correct / total
         marker = " ✓ best" if acc > best_acc else ""
-        print(f"  Epoch {epoch + 1:2d}/5   val_acc={acc:.4f}{marker}")
+        print(f"  Epoch {epoch + 1:2d}/{EPOCHS}   val_acc={acc:.4f}{marker}")
         if acc > best_acc:
             best_acc = acc
             torch.save(model.state_dict(), MODEL_PATH)
 
-    print(f"\nBest val acc: {best_acc:.4f} — model saved → {MODEL_PATH}")
+    print(f"\nBest val acc: {best_acc:.4f} — saved → {MODEL_PATH}")
 
 
 _model_cache = None
