@@ -182,6 +182,32 @@ def _add_noise(tensor):
     return (tensor + noise).clamp(-3.0, 3.0)
 
 
+class _CrossbarSevenDataset:
+    """
+    Wraps a digit dataset and randomly adds a horizontal crossbar to '7'
+    samples (European-style 7̶), teaching the model that 7-with-crossbar = 7.
+    """
+    def __init__(self, dataset, prob=0.40):
+        self.dataset = dataset
+        self.prob    = prob
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        import torch, random
+        x, y = self.dataset[idx]
+        if y == 7 and random.random() < self.prob:
+            x = x.clone()
+            _, h, w = x.shape
+            row = h // 2 + random.randint(-3, 2)
+            row = max(1, min(h - 2, row))
+            # Foreground value in normalised MNIST space ≈ (1.0 - 0.1736)/0.3317
+            fg = (1.0 - 0.1736) / 0.3317
+            x[0, row, w // 4 : 3 * w // 4] = fg
+        return x, y
+
+
 def _train_and_save() -> None:
     import torch
     from torch.utils.data import DataLoader, ConcatDataset
@@ -218,7 +244,8 @@ def _train_and_save() -> None:
     emnist_val   = datasets.EMNIST(str(MNIST_DIR), split="digits", train=False, download=True, transform=val_tf_emnist)
     mnist_val    = datasets.MNIST(str(MNIST_DIR),  train=False, download=True, transform=val_tf_mnist)
 
-    train_loader = DataLoader(ConcatDataset([mnist_train, emnist_train]),
+    combined_train = _CrossbarSevenDataset(ConcatDataset([mnist_train, emnist_train]))
+    train_loader = DataLoader(combined_train,
                               batch_size=256, shuffle=True, num_workers=2)
     val_loader   = DataLoader(ConcatDataset([mnist_val, emnist_val]),
                               batch_size=512, shuffle=False)
@@ -306,6 +333,19 @@ def read_digit(region: np.ndarray, model,
                             cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
     if (inv > 0).mean() < BLANK_THRESHOLD:
+        return "", 0.0
+
+    # Noise rejection via connected components: salt-and-pepper noise produces
+    # many tiny disconnected blobs; a real digit has 1-3 large components.
+    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
+    areas = stats[1:, cv2.CC_STAT_AREA]   # skip background (label 0)
+    if len(areas) == 0:
+        return "", 0.0
+    max_blob = int(areas.max())
+    total_on = int((inv > 0).sum())
+    n_blobs  = len(areas)
+    # Reject if the largest blob is too small OR noise dominates (many blobs, none big)
+    if max_blob < 25 or (n_blobs > 12 and max_blob < total_on * 0.30):
         return "", 0.0
 
     base = cv2.resize(inv, (28, 28), interpolation=cv2.INTER_AREA)
@@ -401,12 +441,32 @@ def read_all_boxes(
 
     # ── Numeric answers ──────────────────────────────────────────────────────
     # Group by question; separate decimal boxes
+    # Track which digit position immediately follows the decimal indicator per Q,
+    # so we can apply a larger left extension there (students write the first
+    # post-decimal digit close to the printed dot, not at the box edge).
+    _post_decimal: dict[int, int] = {}   # q → digit index of first post-decimal box
+    prev_was_decimal: dict[int, bool] = {}
+    for b in layout.get("num_boxes", []):
+        q = b["q"]
+        if b.get("is_decimal"):
+            prev_was_decimal[q] = True
+        elif prev_was_decimal.pop(q, False):
+            _post_decimal[q] = b["digit"]
+
     num_by_q: dict[int, dict] = {}
     for b in layout.get("num_boxes", []):
         q = b["q"]
         num_by_q.setdefault(q, {"digits": {}, "decimal_pos": None})
-        region = extract_region(warped, b["x_mm"], b["y_mm"],
-                                b["w_mm"], b["h_mm"], scale)
+        # Expand left edge so digits written near box borders aren't clipped.
+        # Post-decimal first box needs a larger extension (~4 mm) because the
+        # decimal-indicator box is full-width but the printed dot is centred,
+        # leaving ~3-4 mm of dead space before the student's digit starts.
+        post_dec_digit = _post_decimal.get(q)
+        left_ext = 4.0 if (not b.get("is_decimal") and b["digit"] == post_dec_digit) else 1.0
+        x_mm = b["x_mm"] - left_ext
+        w_mm = b["w_mm"] + left_ext
+        region = extract_region(warped, x_mm, b["y_mm"],
+                                w_mm, b["h_mm"], scale, inner_frac=0.05)
         if b.get("is_decimal"):
             num_by_q[q]["decimal_pos"] = b.get("digit", 0)
         else:
