@@ -480,57 +480,81 @@ def read_all_boxes(
             _post_decimal[q] = b["digit"]
 
     num_by_q: dict[int, dict] = {}
-    _seen_decimal: dict[int, bool] = {}  # q → True once pre-printed decimal box passed
+    _seen_decimal: dict[int, bool] = {}  # q → True once pre-printed decimal box is passed
     for b in layout.get("num_boxes", []):
-        q = b["q"]
+        q   = b["q"]
+        pos = b["digit"]
         num_by_q.setdefault(q, {"digits": {}, "decimal_pos": None})
-        # Expand left edge so digits written near box borders aren't clipped.
-        # Post-decimal first box needs a larger extension (~4 mm) because the
-        # decimal-indicator box is full-width but the printed dot is centred,
-        # leaving ~3-4 mm of dead space before the student's digit starts.
-        # Exception: if the student wrote their own ink in the decimal indicator
-        # box (e.g. Q27 where we patch is_decimal=True on a filled box), limit
-        # extension to the physical gap between the boxes so we don't pull in
-        # the student's handwritten dot and confuse the CNN.
-        post_dec_digit = _post_decimal.get(q)
-        if not b.get("is_decimal") and b["digit"] == post_dec_digit:
-            dec = _dec_box.get(q)
-            if dec is not None:
-                dec_region = extract_region(warped, dec["x_mm"], dec["y_mm"],
-                                            dec["w_mm"], dec["h_mm"], scale, inner_frac=0.05)
-                dec_rd = relative_darkness(dec_region, page_white)
-                if dec_rd > 0.20:
-                    # Student wrote ink here — cap extension at the box gap
-                    gap = b["x_mm"] - (dec["x_mm"] + dec["w_mm"])
-                    left_ext = max(0.0, gap)
-                else:
-                    left_ext = 4.0
-            else:
-                left_ext = 4.0
-        else:
-            left_ext = 1.0
-        x_mm = b["x_mm"] - left_ext
-        w_mm = b["w_mm"] + left_ext
-        region = extract_region(warped, x_mm, b["y_mm"],
-                                w_mm, b["h_mm"], scale, inner_frac=0.05)
+
+        student_dec   = num_by_q[q]["decimal_pos"]           # set if student dot found
+        pre_dec_digit = _dec_box[q]["digit"] if q in _dec_box else None
+
         if b.get("is_decimal"):
+            # ── Pre-printed decimal indicator box ────────────────────────────
             _seen_decimal[q] = True
-            # Only accept the pre-printed decimal pos if the student hasn't
-            # already marked a decimal dot in an earlier integer-part box.
-            if num_by_q[q]["decimal_pos"] is None:
-                num_by_q[q]["decimal_pos"] = b.get("digit", 0)
+            if student_dec is None:
+                # No student dot found yet → use pre-printed position as decimal
+                num_by_q[q]["decimal_pos"] = pos
+            else:
+                # Student already wrote their decimal earlier.
+                # This box may also contain a digit the student wrote over the
+                # pre-printed dot.  Try to read it; include it if confident.
+                plain = extract_region(warped, b["x_mm"], b["y_mm"],
+                                       b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
+                if digit_model is not None:
+                    d, conf = read_digit(plain, digit_model, page_white)
+                else:
+                    rd = relative_darkness(plain, page_white)
+                    d = "?" if rd > BLANK_THRESHOLD else ""
+                    conf = rd
+                if d and d != "?":
+                    num_by_q[q]["digits"][pos] = d
+
         else:
-            pos = b["digit"]
-            # Before the pre-printed decimal indicator, check whether the student
-            # wrote their own decimal dot in this box rather than a digit.
-            # Only do this for questions that have a decimal structure at all.
+            # ── Regular digit box ────────────────────────────────────────────
+            # Check for a student-written decimal dot before the pre-printed
+            # indicator, but only in questions that have a decimal structure.
             if not _seen_decimal.get(q, False) and q in _dec_box:
-                dot_region = extract_region(warped, b["x_mm"], b["y_mm"],
-                                            b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
-                if is_decimal_dot(dot_region, page_white):
-                    if num_by_q[q]["decimal_pos"] is None:
+                dot_crop = extract_region(warped, b["x_mm"], b["y_mm"],
+                                          b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
+                if is_decimal_dot(dot_crop, page_white):
+                    if student_dec is None:
                         num_by_q[q]["decimal_pos"] = pos
                     continue  # don't add this box to digits dict
+
+            # Left-extension: widen the crop leftward so digits written near
+            # the left edge (especially the first post-decimal digit) aren't
+            # clipped.  When the student wrote their own dot before the
+            # pre-printed decimal, don't extend — the student's digits land
+            # naturally in their boxes without the offset seen in normal writing.
+            post_dec_digit = _post_decimal.get(q)
+            if pos == post_dec_digit:
+                if (student_dec is not None
+                        and pre_dec_digit is not None
+                        and student_dec < pre_dec_digit):
+                    left_ext = 1.0          # student decimal earlier → no offset
+                else:
+                    dec = _dec_box.get(q)
+                    if dec is not None:
+                        dec_region = extract_region(warped, dec["x_mm"], dec["y_mm"],
+                                                    dec["w_mm"], dec["h_mm"],
+                                                    scale, inner_frac=0.05)
+                        dec_rd = relative_darkness(dec_region, page_white)
+                        if dec_rd > 0.20:
+                            # Student wrote ink in the decimal box — keep away
+                            gap = b["x_mm"] - (dec["x_mm"] + dec["w_mm"])
+                            left_ext = max(0.0, gap)
+                        else:
+                            left_ext = 4.0
+                    else:
+                        left_ext = 4.0
+            else:
+                left_ext = 1.0
+
+            x_mm   = b["x_mm"] - left_ext
+            w_mm   = b["w_mm"] + left_ext
+            region = extract_region(warped, x_mm, b["y_mm"],
+                                    w_mm, b["h_mm"], scale, inner_frac=0.05)
             if digit_model is not None:
                 d, conf = read_digit(region, digit_model, page_white)
             else:
