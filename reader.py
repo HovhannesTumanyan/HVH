@@ -445,11 +445,13 @@ def read_all_boxes(
     # so we can apply a larger left extension there (students write the first
     # post-decimal digit close to the printed dot, not at the box edge).
     _post_decimal: dict[int, int] = {}   # q → digit index of first post-decimal box
+    _dec_box: dict[int, dict] = {}       # q → decimal indicator box metadata
     prev_was_decimal: dict[int, bool] = {}
     for b in layout.get("num_boxes", []):
         q = b["q"]
         if b.get("is_decimal"):
             prev_was_decimal[q] = True
+            _dec_box[q] = b
         elif prev_was_decimal.pop(q, False):
             _post_decimal[q] = b["digit"]
 
@@ -461,8 +463,27 @@ def read_all_boxes(
         # Post-decimal first box needs a larger extension (~4 mm) because the
         # decimal-indicator box is full-width but the printed dot is centred,
         # leaving ~3-4 mm of dead space before the student's digit starts.
+        # Exception: if the student wrote their own ink in the decimal indicator
+        # box (e.g. Q27 where we patch is_decimal=True on a filled box), limit
+        # extension to the physical gap between the boxes so we don't pull in
+        # the student's handwritten dot and confuse the CNN.
         post_dec_digit = _post_decimal.get(q)
-        left_ext = 4.0 if (not b.get("is_decimal") and b["digit"] == post_dec_digit) else 1.0
+        if not b.get("is_decimal") and b["digit"] == post_dec_digit:
+            dec = _dec_box.get(q)
+            if dec is not None:
+                dec_region = extract_region(warped, dec["x_mm"], dec["y_mm"],
+                                            dec["w_mm"], dec["h_mm"], scale, inner_frac=0.05)
+                dec_rd = relative_darkness(dec_region, page_white)
+                if dec_rd > 0.20:
+                    # Student wrote ink here — cap extension at the box gap
+                    gap = b["x_mm"] - (dec["x_mm"] + dec["w_mm"])
+                    left_ext = max(0.0, gap)
+                else:
+                    left_ext = 4.0
+            else:
+                left_ext = 4.0
+        else:
+            left_ext = 1.0
         x_mm = b["x_mm"] - left_ext
         w_mm = b["w_mm"] + left_ext
         region = extract_region(warped, x_mm, b["y_mm"],
@@ -494,9 +515,17 @@ def read_all_boxes(
         sorted_digits = [digs.get(i, "") for i in sorted(digs)]
         dp     = info["decimal_pos"]
         if dp is not None:
-            # Insert decimal point between digit at decimal_pos and decimal_pos+1
-            parts = sorted_digits[:dp] + ["."] + sorted_digits[dp:]
-            value = "".join(parts)
+            int_part  = "".join(sorted_digits[:dp])
+            frac_part = "".join(sorted_digits[dp:])
+            # Only include decimal dot if there is at least one digit on each side
+            if int_part and frac_part:
+                value = int_part + "." + frac_part
+            elif int_part:
+                value = int_part          # no fractional digits written
+            elif frac_part:
+                value = frac_part         # no integer digits written (leading dot suppressed)
+            else:
+                value = ""
         else:
             value = "".join(sorted_digits)
         answers[f"Q{q:02d}"] = {
