@@ -81,6 +81,30 @@ def is_filled(region: np.ndarray, page_white: float = 200.0) -> bool:
     return relative_darkness(region, page_white) > FILLED_THRESHOLD
 
 
+def is_decimal_dot(region: np.ndarray, page_white: float) -> bool:
+    """Return True if the region likely contains a handwritten decimal point.
+
+    A decimal dot is a small, roughly circular blob occupying less than 40%
+    of the crop in each dimension — clearly smaller than any real digit.
+    """
+    if relative_darkness(region, page_white) < 0.05:
+        return False
+    gray = _to_gray(region)
+    _, inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    if len(areas) == 0:
+        return False
+    h, w = inv.shape
+    max_idx = int(areas.argmax()) + 1
+    bw = stats[max_idx, cv2.CC_STAT_WIDTH]
+    bh = stats[max_idx, cv2.CC_STAT_HEIGHT]
+    frac_h = bh / max(h, 1)
+    frac_w = bw / max(w, 1)
+    aspect = bw / max(bh, 1)
+    return frac_h < 0.40 and frac_w < 0.40 and 0.4 < aspect < 2.5
+
+
 # ── Digit model ───────────────────────────────────────────────────────────────
 #
 # Target: ≥99.9% on isolated handwritten digits.
@@ -456,6 +480,7 @@ def read_all_boxes(
             _post_decimal[q] = b["digit"]
 
     num_by_q: dict[int, dict] = {}
+    _seen_decimal: dict[int, bool] = {}  # q → True once pre-printed decimal box passed
     for b in layout.get("num_boxes", []):
         q = b["q"]
         num_by_q.setdefault(q, {"digits": {}, "decimal_pos": None})
@@ -489,9 +514,23 @@ def read_all_boxes(
         region = extract_region(warped, x_mm, b["y_mm"],
                                 w_mm, b["h_mm"], scale, inner_frac=0.05)
         if b.get("is_decimal"):
-            num_by_q[q]["decimal_pos"] = b.get("digit", 0)
+            _seen_decimal[q] = True
+            # Only accept the pre-printed decimal pos if the student hasn't
+            # already marked a decimal dot in an earlier integer-part box.
+            if num_by_q[q]["decimal_pos"] is None:
+                num_by_q[q]["decimal_pos"] = b.get("digit", 0)
         else:
-            pos = b["digit"]   # 1-based digit position within the question
+            pos = b["digit"]
+            # Before the pre-printed decimal indicator, check whether the student
+            # wrote their own decimal dot in this box rather than a digit.
+            # Only do this for questions that have a decimal structure at all.
+            if not _seen_decimal.get(q, False) and q in _dec_box:
+                dot_region = extract_region(warped, b["x_mm"], b["y_mm"],
+                                            b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
+                if is_decimal_dot(dot_region, page_white):
+                    if num_by_q[q]["decimal_pos"] is None:
+                        num_by_q[q]["decimal_pos"] = pos
+                    continue  # don't add this box to digits dict
             if digit_model is not None:
                 d, conf = read_digit(region, digit_model, page_white)
             else:
