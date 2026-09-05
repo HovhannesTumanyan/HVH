@@ -47,6 +47,23 @@ def _to_gray(region: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(region, cv2.COLOR_BGR2GRAY) if region.ndim == 3 else region
 
 
+def enhance_contrast(warped: np.ndarray,
+                     clip_limit: float = 2.0,
+                     tile_grid: int = 8) -> np.ndarray:
+    """Apply CLAHE to the L channel of the warped sheet.
+
+    Boosts local contrast so faint ink becomes clearly darker than the
+    surrounding paper — without inventing content in genuinely blank regions.
+    Operates in LAB colour space so hue and saturation are untouched.
+    """
+    lab = cv2.cvtColor(warped, cv2.COLOR_BGR2LAB)
+    l_ch, a_ch, b_ch = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=clip_limit,
+                             tileGridSize=(tile_grid, tile_grid))
+    lab_enhanced = cv2.merge([clahe.apply(l_ch), a_ch, b_ch])
+    return cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+
+
 # ── Checkbox detection ────────────────────────────────────────────────────────
 
 def sample_page_white(warped: np.ndarray) -> float:
@@ -350,7 +367,8 @@ def _count_loops(inv: np.ndarray) -> int:
 
 def read_digit(region: np.ndarray, model,
                page_white: float = 200.0,
-               _crops: list | None = None) -> tuple[str, float, str]:
+               _crops: list | None = None,
+               _force_read: bool = False) -> tuple[str, float, str]:
     """
     Predict the handwritten digit in *region* using TTA.
     Returns:
@@ -359,6 +377,8 @@ def read_digit(region: np.ndarray, model,
       ("3", 0.97, reason) — predicted digit with confidence
 
     If _crops is a list, appends (raw_crop_bgr, bin28_gray, digit, reason) for visualisation.
+    Set _force_read=True to skip the relative-darkness blank gate (caller already pre-checked
+    using a CLAHE-enhanced crop; the original unmodified region is passed for CNN input).
     """
     import torch, torch.nn.functional as F
     import torchvision.transforms.functional as TF
@@ -367,7 +387,7 @@ def read_digit(region: np.ndarray, model,
 
     # Relative-darkness check first: avoids Otsu splitting a light/empty box
     # into ~50% "dark" pixels which the CNN then misclassifies as "8".
-    if rd < DIGIT_BLANK_REL:
+    if not _force_read and rd < DIGIT_BLANK_REL:
         reason = f"blank(rd={rd:.3f})"
         if _crops is not None:
             _crops.append((region.copy(), None, "", reason))
@@ -560,19 +580,31 @@ def read_all_boxes(
           }
         }
     """
+    # ── Boost local contrast for blank detection only ───────────────────────
+    # CLAHE-enhanced image is used solely for relative_darkness / page_white
+    # so faint digits pass the blank threshold.  The original warped image is
+    # kept for the CNN crops: Otsu handles local normalisation there, and the
+    # model was trained on MNIST-like data closer to the unmodified appearance.
+    warped_enh = enhance_contrast(warped)
+
     # ── Sample page-white level for relative darkness calculation ────────────
-    page_white = sample_page_white(warped)
+    page_white = sample_page_white(warped_enh)
 
     # ── Student ID ───────────────────────────────────────────────────────────
     id_digits = []
     for b in sorted(layout.get("id_boxes", []), key=lambda x: x["digit"]):
-        region = extract_region(warped, b["x_mm"], b["y_mm"],
-                                b["w_mm"], b["h_mm"], scale)
+        enh_region  = extract_region(warped_enh, b["x_mm"], b["y_mm"],
+                                     b["w_mm"], b["h_mm"], scale)
+        orig_region = extract_region(warped, b["x_mm"], b["y_mm"],
+                                     b["w_mm"], b["h_mm"], scale)
         if digit_model is not None:
-            d, _, _r = read_digit(region, digit_model, page_white)
+            enh_rd = relative_darkness(enh_region, page_white)
+            force = enh_rd >= DIGIT_BLANK_REL
+            d, _, _r = read_digit(orig_region, digit_model, page_white,
+                                   _force_read=force)
             id_digits.append(d)
         else:
-            id_digits.append("?" if relative_darkness(region, page_white) > BLANK_THRESHOLD else "")
+            id_digits.append("?" if relative_darkness(enh_region, page_white) > BLANK_THRESHOLD else "")
     student_id = "".join(id_digits)
 
     # ── MCQ answers ──────────────────────────────────────────────────────────
@@ -584,7 +616,7 @@ def read_all_boxes(
     for b in layout.get("mcq_boxes", []):
         q = b["q"]
         mcq_ratios.setdefault(q, {})
-        region = extract_region(warped, b["x_mm"], b["y_mm"],
+        region = extract_region(warped_enh, b["x_mm"], b["y_mm"],
                                 b["w_mm"], b["h_mm"], scale)
         mcq_ratios[q][b["opt"]] = relative_darkness(region, page_white)
 
@@ -645,13 +677,18 @@ def read_all_boxes(
                 # Student already wrote their decimal earlier.
                 # This box may also contain a digit the student wrote over the
                 # pre-printed dot.  Try to read it; include it if confident.
-                plain = extract_region(warped, b["x_mm"], b["y_mm"],
-                                       b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
+                plain_enh  = extract_region(warped_enh, b["x_mm"], b["y_mm"],
+                                            b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
+                plain_orig = extract_region(warped, b["x_mm"], b["y_mm"],
+                                            b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
+                enh_rd = relative_darkness(plain_enh, page_white)
                 if digit_model is not None:
-                    d, conf, reason = read_digit(plain, digit_model, page_white,
-                                                 _crops=num_by_q[q]["_crops"])
+                    force = enh_rd >= DIGIT_BLANK_REL
+                    d, conf, reason = read_digit(plain_orig, digit_model, page_white,
+                                                 _crops=num_by_q[q]["_crops"],
+                                                 _force_read=force)
                 else:
-                    rd = relative_darkness(plain, page_white)
+                    rd = relative_darkness(plain_enh, page_white)
                     d = "?" if rd > BLANK_THRESHOLD else ""
                     conf = rd
                     reason = f"rd={rd:.3f}"
@@ -664,7 +701,7 @@ def read_all_boxes(
             # Check for a student-written decimal dot before the pre-printed
             # indicator, but only in questions that have a decimal structure.
             if not _seen_decimal.get(q, False) and q in _dec_box:
-                dot_crop = extract_region(warped, b["x_mm"], b["y_mm"],
+                dot_crop = extract_region(warped_enh, b["x_mm"], b["y_mm"],
                                           b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
                 if is_decimal_dot(dot_crop, page_white):
                     if student_dec is None:
@@ -701,15 +738,21 @@ def read_all_boxes(
             else:
                 left_ext = 1.0
 
-            x_mm   = b["x_mm"] - left_ext
-            w_mm   = b["w_mm"] + left_ext
-            region = extract_region(warped, x_mm, b["y_mm"],
-                                    w_mm, b["h_mm"], scale, inner_frac=0.05)
+            x_mm = b["x_mm"] - left_ext
+            w_mm = b["w_mm"] + left_ext
+            # Pre-check with enhanced image; feed original to CNN
+            enh_region  = extract_region(warped_enh, x_mm, b["y_mm"],
+                                         w_mm, b["h_mm"], scale, inner_frac=0.05)
+            orig_region = extract_region(warped, x_mm, b["y_mm"],
+                                         w_mm, b["h_mm"], scale, inner_frac=0.05)
+            enh_rd = relative_darkness(enh_region, page_white)
             if digit_model is not None:
-                d, conf, reason = read_digit(region, digit_model, page_white,
-                                             _crops=num_by_q[q]["_crops"])
+                force = enh_rd >= DIGIT_BLANK_REL
+                d, conf, reason = read_digit(orig_region, digit_model, page_white,
+                                             _crops=num_by_q[q]["_crops"],
+                                             _force_read=force)
             else:
-                ratio = relative_darkness(region, page_white)
+                ratio = relative_darkness(enh_region, page_white)
                 d = "?" if ratio > BLANK_THRESHOLD else ""
                 conf = ratio
                 reason = f"rd={ratio:.3f}"
