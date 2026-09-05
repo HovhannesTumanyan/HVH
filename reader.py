@@ -368,7 +368,8 @@ def _count_loops(inv: np.ndarray) -> int:
 def read_digit(region: np.ndarray, model,
                page_white: float = 200.0,
                _crops: list | None = None,
-               _force_read: bool = False) -> tuple[str, float, str]:
+               _force_read: bool = False,
+               _enh_crop: np.ndarray | None = None) -> tuple[str, float, str]:
     """
     Predict the handwritten digit in *region* using TTA.
     Returns:
@@ -376,12 +377,20 @@ def read_digit(region: np.ndarray, model,
       ("?", conf, reason) — model uncertain (conf < CONFIDENCE_THRESHOLD)
       ("3", 0.97, reason) — predicted digit with confidence
 
-    If _crops is a list, appends (raw_crop_bgr, bin28_gray, digit, reason) for visualisation.
-    Set _force_read=True to skip the relative-darkness blank gate (caller already pre-checked
-    using a CLAHE-enhanced crop; the original unmodified region is passed for CNN input).
+    _crops  — if a list, appends (orig_bgr, enh_bgr, bin28_gray, digit, reason)
+    _force_read — skip the internal rd blank gate (caller pre-checked via CLAHE)
+    _enh_crop   — CLAHE-enhanced version of the same region, stored alongside
+                  the original in _crops for visualisation
     """
     import torch, torch.nn.functional as F
     import torchvision.transforms.functional as TF
+
+    def _store(bin28, digit, reason):
+        if _crops is not None:
+            _crops.append((region.copy(),
+                           _enh_crop.copy() if _enh_crop is not None else None,
+                           bin28,
+                           digit, reason))
 
     rd = relative_darkness(region, page_white)
 
@@ -389,8 +398,7 @@ def read_digit(region: np.ndarray, model,
     # into ~50% "dark" pixels which the CNN then misclassifies as "8".
     if not _force_read and rd < DIGIT_BLANK_REL:
         reason = f"blank(rd={rd:.3f})"
-        if _crops is not None:
-            _crops.append((region.copy(), None, "", reason))
+        _store(None, "", reason)
         return "", 0.0, reason
 
     gray   = _to_gray(region)
@@ -400,8 +408,7 @@ def read_digit(region: np.ndarray, model,
     pixel_ratio = float((inv > 0).mean())
     if pixel_ratio < BLANK_THRESHOLD:
         reason = f"blank(pix={pixel_ratio:.3f})"
-        if _crops is not None:
-            _crops.append((region.copy(), None, "", reason))
+        _store(None, "", reason)
         return "", 0.0, reason
 
     # Noise rejection via connected components: salt-and-pepper noise produces
@@ -410,8 +417,7 @@ def read_digit(region: np.ndarray, model,
     areas = stats[1:, cv2.CC_STAT_AREA]   # skip background (label 0)
     if len(areas) == 0:
         reason = "blank(no blobs)"
-        if _crops is not None:
-            _crops.append((region.copy(), None, "", reason))
+        _store(None, "", reason)
         return "", 0.0, reason
     max_blob = int(areas.max())
     total_on = int((inv > 0).sum())
@@ -419,8 +425,7 @@ def read_digit(region: np.ndarray, model,
     # Reject if the largest blob is too small OR noise dominates (many blobs, none big)
     if max_blob < 25 or (n_blobs > 12 and max_blob < total_on * 0.30):
         reason = f"noise(blobs={n_blobs},max={max_blob})"
-        if _crops is not None:
-            _crops.append((region.copy(), None, "", reason))
+        _store(None, "", reason)
         return "", 0.0, reason
 
     base = cv2.resize(inv, (28, 28), interpolation=cv2.INTER_AREA)
@@ -452,35 +457,35 @@ def read_digit(region: np.ndarray, model,
             if alt_p > 0.05:   # any non-trivial mass on 6/9 is enough given topology
                 d, conf = alt, alt_p
                 reason = f"rd={rd:.3f},conf={conf:.2f},loop→{d}"
-                if _crops is not None:
-                    _crops.append((region.copy(), base.copy(), str(d), reason))
+                _store(base.copy(), str(d), reason)
                 return str(d), float(conf), reason
 
     reason = f"rd={rd:.3f},conf={conf:.2f}"
     if conf < CONFIDENCE_THRESHOLD:
         reason = f"low_conf({d}@{conf:.2f},rd={rd:.3f})"
-        if _crops is not None:
-            _crops.append((region.copy(), base.copy(), "?", reason))
+        _store(base.copy(), "?", reason)
         return "?", conf, reason
 
-    if _crops is not None:
-        _crops.append((region.copy(), base.copy(), str(d), reason))
+    _store(base.copy(), str(d), reason)
     return str(d), float(conf), reason
 
 
 def build_digit_debug_image(results: dict) -> np.ndarray:
-    """Build a BGR grid image showing, per numeric question, each digit box:
-    left half = raw crop from warped sheet, right half = 28×28 model input.
-    """
-    CELL_H   = 56          # height for each crop panel
-    CELL_W28 = 56          # width for the 28×28 panel (square)
-    PAD      = 6           # gap between panels and between digits
-    HDR_H    = 22          # header row height (question label + value)
-    Q_W      = 90          # left column: question label
-    BG       = (245, 245, 245)
-    FONT     = cv2.FONT_HERSHEY_SIMPLEX
+    """Build a BGR grid — 3 panels per digit box:
+      1. Original crop  2. CLAHE-enhanced crop  3. 28×28 Otsu/binarized model input
 
-    # Collect only numeric questions that have debug crops
+    _crops tuples: (orig_bgr, enh_bgr, bin28_gray, digit, reason)
+    """
+    CELL_H = 56          # height of every panel
+    CELL_W = 56          # width of panels 1 & 2 (square); panel 3 is always square
+    PAD    = 4           # gap between panels within one digit group
+    GAP    = 10          # gap between digit groups
+    HDR_H  = 22          # top header row per question
+    Q_W    = 90          # left column for question label
+    BG     = (245, 245, 245)
+    FONT   = cv2.FONT_HERSHEY_SIMPLEX
+    GRP_W  = CELL_W + PAD + CELL_W + PAD + CELL_W   # width of one digit group
+
     rows_data = []
     for key in sorted(results.get("answers", {})):
         val = results["answers"][key]
@@ -496,67 +501,75 @@ def build_digit_debug_image(results: dict) -> np.ndarray:
         cv2.putText(blank, "no digit crops", (10, 50), FONT, 0.6, (100, 100, 100), 1)
         return blank
 
-    # Compute max row width
     max_n = max(len(crops) for _, _, crops in rows_data)
-    cell_w_raw = CELL_H * 2   # raw crop scaled to CELL_H height, assume ~2:1 aspect
-    col_w = cell_w_raw + PAD + CELL_W28 + PAD   # one digit column
-    img_w = Q_W + max_n * col_w + PAD
+    img_w = Q_W + max_n * (GRP_W + GAP) + PAD
     row_h = HDR_H + CELL_H + PAD
+
+    def _panel(strip, img, x, y, w, h, grey_fill=False):
+        """Draw one panel (colour or grey) with a border."""
+        if grey_fill or img is None:
+            strip[y: y + h, x: x + w] = (210, 210, 210)
+        else:
+            if img.ndim == 2:                         # grayscale → BGR
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            ih, iw = img.shape[:2]
+            s = min(w / max(iw, 1), h / max(ih, 1))
+            nw, nh = max(1, int(iw * s)), max(1, int(ih * s))
+            resized = cv2.resize(img, (nw, nh))
+            ox, oy = (w - nw) // 2, (h - nh) // 2
+            strip[y + oy: y + oy + nh, x + ox: x + ox + nw] = resized
+        cv2.rectangle(strip, (x, y), (x + w - 1, y + h - 1), (180, 180, 180), 1)
 
     strips = []
     for q_label, value, crops in rows_data:
         strip = np.full((row_h, img_w, 3), BG, dtype=np.uint8)
+        cv2.putText(strip, f"{q_label} = {value}",
+                    (4, HDR_H - 5), FONT, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
 
-        # Question header
-        hdr = f"{q_label} = {value}"
-        cv2.putText(strip, hdr, (4, HDR_H - 5), FONT, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+        # Column headers (only on first strip)
+        if strips == []:
+            for hdr_txt, hx in [("orig", Q_W + 1),
+                                  ("CLAHE", Q_W + CELL_W + PAD + 1),
+                                  ("28×28", Q_W + 2 * (CELL_W + PAD) + 1)]:
+                cv2.putText(strip, hdr_txt, (hx, 11),
+                            FONT, 0.30, (100, 100, 100), 1, cv2.LINE_AA)
 
         x = Q_W
-        for raw_bgr, bin28, digit, reason in crops:
-            # ── Raw crop ────────────────────────────────────────────────────
-            rh, rw = raw_bgr.shape[:2]
-            scale_r = CELL_H / max(rh, 1)
-            new_rw  = max(1, int(rw * scale_r))
-            raw_s   = cv2.resize(raw_bgr, (new_rw, CELL_H))
-            # draw into strip (clip if wider than cell_w_raw)
-            draw_w = min(new_rw, cell_w_raw)
-            strip[HDR_H: HDR_H + CELL_H, x: x + draw_w] = raw_s[:, :draw_w]
-            # thin border
-            cv2.rectangle(strip, (x, HDR_H), (x + draw_w - 1, HDR_H + CELL_H - 1),
-                          (180, 180, 180), 1)
+        for entry in crops:
+            orig_bgr, enh_bgr, bin28, digit, reason = entry
 
-            # ── 28×28 model input ────────────────────────────────────────────
-            x28 = x + cell_w_raw + PAD
+            # ── 1. Original crop ─────────────────────────────────────────
+            _panel(strip, orig_bgr, x, HDR_H, CELL_W, CELL_H)
+
+            # ── 2. CLAHE-enhanced crop ────────────────────────────────────
+            x2 = x + CELL_W + PAD
+            _panel(strip, enh_bgr, x2, HDR_H, CELL_W, CELL_H,
+                   grey_fill=(enh_bgr is None))
+
+            # ── 3. 28×28 model input (invert: black digit on white bg) ────
+            x3 = x2 + CELL_W + PAD
             if bin28 is not None:
-                # white-on-black → invert to black-on-white for display
-                disp28 = cv2.resize(255 - bin28, (CELL_W28, CELL_H),
-                                    interpolation=cv2.INTER_NEAREST)
-                disp28_bgr = cv2.cvtColor(disp28, cv2.COLOR_GRAY2BGR)
-                strip[HDR_H: HDR_H + CELL_H, x28: x28 + CELL_W28] = disp28_bgr
+                _panel(strip, 255 - bin28, x3, HDR_H, CELL_W, CELL_H)
             else:
-                # blank box — grey fill
-                strip[HDR_H: HDR_H + CELL_H, x28: x28 + CELL_W28] = (210, 210, 210)
-            cv2.rectangle(strip, (x28, HDR_H), (x28 + CELL_W28 - 1, HDR_H + CELL_H - 1),
-                          (180, 180, 180), 1)
+                _panel(strip, None, x3, HDR_H, CELL_W, CELL_H, grey_fill=True)
 
-            # ── Digit label (top of cell pair) ───────────────────────────────
-            label_color = (0, 140, 0) if digit not in ("", "?") else \
-                          (0, 0, 180) if digit == "?" else (120, 120, 120)
-            label = digit if digit not in ("",) else "_"
+            # ── Digit label ───────────────────────────────────────────────
+            label = digit if digit != "" else "_"
+            col   = (0, 140, 0) if digit not in ("", "?") else \
+                    (0, 0, 180) if digit == "?" else (120, 120, 120)
             cv2.putText(strip, label, (x + 2, HDR_H - 3),
-                        FONT, 0.55, label_color, 1, cv2.LINE_AA)
+                        FONT, 0.55, col, 1, cv2.LINE_AA)
 
-            x += col_w
+            x += GRP_W + GAP
 
         strips.append(strip)
 
-    # Separator line between questions
     sep = np.full((2, img_w, 3), 200, dtype=np.uint8)
-    out_rows = []
+    out = []
     for s in strips:
-        out_rows.append(s)
-        out_rows.append(sep)
-    return np.vstack(out_rows[:-1])   # drop trailing separator
+        out.append(s)
+        out.append(sep)
+    return np.vstack(out[:-1])
 
 
 # ── High-level box readers ────────────────────────────────────────────────────
@@ -683,10 +696,12 @@ def read_all_boxes(
                                             b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
                 enh_rd = relative_darkness(plain_enh, page_white)
                 if digit_model is not None:
+                    enh_rd = relative_darkness(plain_enh, page_white)
                     force = enh_rd >= DIGIT_BLANK_REL
                     d, conf, reason = read_digit(plain_orig, digit_model, page_white,
                                                  _crops=num_by_q[q]["_crops"],
-                                                 _force_read=force)
+                                                 _force_read=force,
+                                                 _enh_crop=plain_enh)
                 else:
                     rd = relative_darkness(plain_enh, page_white)
                     d = "?" if rd > BLANK_THRESHOLD else ""
@@ -750,7 +765,8 @@ def read_all_boxes(
                 force = enh_rd >= DIGIT_BLANK_REL
                 d, conf, reason = read_digit(orig_region, digit_model, page_white,
                                              _crops=num_by_q[q]["_crops"],
-                                             _force_read=force)
+                                             _force_read=force,
+                                             _enh_crop=enh_region)
             else:
                 ratio = relative_darkness(enh_region, page_white)
                 d = "?" if ratio > BLANK_THRESHOLD else ""
