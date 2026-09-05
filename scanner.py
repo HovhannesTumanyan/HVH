@@ -378,10 +378,11 @@ def main() -> None:
                 ans = val["answer"] or "(none)"
                 filled = [o for o, f in val["options"].items() if f]
                 detail = f"filled={filled}" if len(filled) != 1 else ""
+                print(f"  {key:5s}  {val['type']:8s}  {ans}  {detail}")
             else:
                 ans    = val["value"] or "(blank)"
-                detail = ""
-            print(f"  {key:5s}  {val['type']:8s}  {ans}  {detail}")
+                dbg    = "  " + " ".join(val.get("debug", [])) if val.get("debug") else ""
+                print(f"  {key:5s}  {val['type']:8s}  {ans}{dbg}")
 
 
 if __name__ == "__main__":

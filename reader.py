@@ -118,7 +118,7 @@ def is_decimal_dot(region: np.ndarray, page_white: float) -> bool:
 #   • Test-Time Augmentation (TTA): average 8 predictions at inference
 #   • Confidence threshold: uncertain → "?" rather than wrong guess
 
-CONFIDENCE_THRESHOLD = 0.55   # below this → return "?" (flag for review)
+CONFIDENCE_THRESHOLD = 0.45   # below this → return "?" (flag for review)
 TTA_N = 8                      # number of augmented predictions to average
 
 def _build_model():
@@ -333,52 +333,67 @@ def _preprocess(inv: np.ndarray) -> "torch.Tensor":
     return (t - 0.1736) / 0.3317
 
 
-DIGIT_BLANK_REL = 0.08   # relative-darkness below this → digit box is empty
+DIGIT_BLANK_REL = 0.05   # relative-darkness below this → digit box is empty
+
+def _count_loops(inv: np.ndarray) -> int:
+    """Count topological holes (closed loops) in a binarized digit image.
+
+    Digits with loops: 0, 6, 8, 9 (0/8 have 1-2, 6/9 have 1).
+    Digits without loops: 1, 2, 3, 4, 5, 7 → 0.
+    Uses RETR_CCOMP: inner contours (holes) have a parent contour.
+    """
+    contours, hierarchy = cv2.findContours(inv, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None or len(hierarchy) == 0:
+        return 0
+    return sum(1 for h in hierarchy[0] if h[3] >= 0)
+
 
 def read_digit(region: np.ndarray, model,
-               page_white: float = 200.0) -> tuple[str, float]:
+               page_white: float = 200.0) -> tuple[str, float, str]:
     """
     Predict the handwritten digit in *region* using TTA.
     Returns:
-      ("",  0.0)  — box is empty
-      ("?", conf) — model uncertain (conf < CONFIDENCE_THRESHOLD)
-      ("3", 0.97) — predicted digit with confidence
+      ("",  0.0,  reason) — box is empty
+      ("?", conf, reason) — model uncertain (conf < CONFIDENCE_THRESHOLD)
+      ("3", 0.97, reason) — predicted digit with confidence
     """
     import torch, torch.nn.functional as F
     import torchvision.transforms.functional as TF
 
+    rd = relative_darkness(region, page_white)
+
     # Relative-darkness check first: avoids Otsu splitting a light/empty box
     # into ~50% "dark" pixels which the CNN then misclassifies as "8".
-    if relative_darkness(region, page_white) < DIGIT_BLANK_REL:
-        return "", 0.0
+    if rd < DIGIT_BLANK_REL:
+        return "", 0.0, f"blank(rd={rd:.3f})"
 
     gray   = _to_gray(region)
     _, inv = cv2.threshold(gray, 0, 255,
                             cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
-    if (inv > 0).mean() < BLANK_THRESHOLD:
-        return "", 0.0
+    pixel_ratio = float((inv > 0).mean())
+    if pixel_ratio < BLANK_THRESHOLD:
+        return "", 0.0, f"blank(pix={pixel_ratio:.3f})"
 
     # Noise rejection via connected components: salt-and-pepper noise produces
     # many tiny disconnected blobs; a real digit has 1-3 large components.
     n_labels, _, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
     areas = stats[1:, cv2.CC_STAT_AREA]   # skip background (label 0)
     if len(areas) == 0:
-        return "", 0.0
+        return "", 0.0, "blank(no blobs)"
     max_blob = int(areas.max())
     total_on = int((inv > 0).sum())
     n_blobs  = len(areas)
     # Reject if the largest blob is too small OR noise dominates (many blobs, none big)
     if max_blob < 25 or (n_blobs > 12 and max_blob < total_on * 0.30):
-        return "", 0.0
+        return "", 0.0, f"noise(blobs={n_blobs},max={max_blob})"
 
     base = cv2.resize(inv, (28, 28), interpolation=cv2.INTER_AREA)
     t0   = _preprocess(base)
 
     # Build TTA batch: identity + rotations + slight shifts
-    angles     = [-8, -4, 0, 4, 8]
-    translates = [(-0.05, 0), (0.05, 0), (0, 0)]
-    variants   = [t0]
+    angles   = [-8, -4, 0, 4, 8]
+    variants = [t0]
     for ang in angles[:TTA_N - 1]:
         aug = TF.rotate(t0, ang, fill=t0.min().item())
         variants.append(aug)
@@ -389,9 +404,24 @@ def read_digit(region: np.ndarray, model,
 
     d    = avg_probs.argmax().item()
     conf = avg_probs[d].item()
+
+    # Topology override: "3" and "5" never have a closed loop; "6" and "9" always do.
+    # If the model prefers 3/5 but the image has a topological hole, pick 6 or 9
+    # (whichever the model rates higher) instead.  Because topology structurally
+    # eliminates 3 and 5, we accept the loop-derived answer at a lower threshold.
+    if d in (3, 5):
+        n_loops = _count_loops(cv2.resize(inv, (28, 28), interpolation=cv2.INTER_AREA))
+        if n_loops >= 1:
+            alt = max(6, 9, key=lambda x: avg_probs[x].item())
+            alt_p = avg_probs[alt].item()
+            if alt_p > 0.05:   # any non-trivial mass on 6/9 is enough given topology
+                d, conf = alt, alt_p
+                return str(d), float(conf), f"rd={rd:.3f},conf={conf:.2f},loop→{d}"
+
+    reason = f"rd={rd:.3f},conf={conf:.2f}"
     if conf < CONFIDENCE_THRESHOLD:
-        return "?", conf
-    return str(d), float(conf)
+        return "?", conf, f"low_conf({d}@{conf:.2f},rd={rd:.3f})"
+    return str(d), float(conf), reason
 
 
 # ── High-level box readers ────────────────────────────────────────────────────
@@ -424,7 +454,7 @@ def read_all_boxes(
         region = extract_region(warped, b["x_mm"], b["y_mm"],
                                 b["w_mm"], b["h_mm"], scale)
         if digit_model is not None:
-            d, _ = read_digit(region, digit_model, page_white)
+            d, _, _r = read_digit(region, digit_model, page_white)
             id_digits.append(d)
         else:
             id_digits.append("?" if relative_darkness(region, page_white) > BLANK_THRESHOLD else "")
@@ -484,7 +514,7 @@ def read_all_boxes(
     for b in layout.get("num_boxes", []):
         q   = b["q"]
         pos = b["digit"]
-        num_by_q.setdefault(q, {"digits": {}, "decimal_pos": None})
+        num_by_q.setdefault(q, {"digits": {}, "decimal_pos": None, "debug": []})
 
         student_dec   = num_by_q[q]["decimal_pos"]           # set if student dot found
         pre_dec_digit = _dec_box[q]["digit"] if q in _dec_box else None
@@ -495,6 +525,7 @@ def read_all_boxes(
             if student_dec is None:
                 # No student dot found yet → use pre-printed position as decimal
                 num_by_q[q]["decimal_pos"] = pos
+                num_by_q[q]["debug"].append(f"d{pos}=.(pre-printed)")
             else:
                 # Student already wrote their decimal earlier.
                 # This box may also contain a digit the student wrote over the
@@ -502,13 +533,15 @@ def read_all_boxes(
                 plain = extract_region(warped, b["x_mm"], b["y_mm"],
                                        b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
                 if digit_model is not None:
-                    d, conf = read_digit(plain, digit_model, page_white)
+                    d, conf, reason = read_digit(plain, digit_model, page_white)
                 else:
                     rd = relative_darkness(plain, page_white)
                     d = "?" if rd > BLANK_THRESHOLD else ""
                     conf = rd
+                    reason = f"rd={rd:.3f}"
                 if d and d != "?":
                     num_by_q[q]["digits"][pos] = d
+                num_by_q[q]["debug"].append(f"d{pos}=.(+{d or 'skip'},{reason})")
 
         else:
             # ── Regular digit box ────────────────────────────────────────────
@@ -520,6 +553,7 @@ def read_all_boxes(
                 if is_decimal_dot(dot_crop, page_white):
                     if student_dec is None:
                         num_by_q[q]["decimal_pos"] = pos
+                    num_by_q[q]["debug"].append(f"d{pos}=.(student-dot)")
                     continue  # don't add this box to digits dict
 
             # Left-extension: widen the crop leftward so digits written near
@@ -556,12 +590,14 @@ def read_all_boxes(
             region = extract_region(warped, x_mm, b["y_mm"],
                                     w_mm, b["h_mm"], scale, inner_frac=0.05)
             if digit_model is not None:
-                d, conf = read_digit(region, digit_model, page_white)
+                d, conf, reason = read_digit(region, digit_model, page_white)
             else:
                 ratio = relative_darkness(region, page_white)
                 d = "?" if ratio > BLANK_THRESHOLD else ""
                 conf = ratio
+                reason = f"rd={ratio:.3f}"
             num_by_q[q]["digits"][pos] = d
+            num_by_q[q]["debug"].append(f"d{pos}={d or '_'}({reason})")
 
     # ── Assemble answers ─────────────────────────────────────────────────────
     answers: dict[str, dict] = {}
@@ -595,6 +631,7 @@ def read_all_boxes(
             "type": "numeric",
             "digits": sorted_digits,
             "value": value,
+            "debug": info.get("debug", []),
         }
 
     return {"student_id": student_id, "answers": answers}
