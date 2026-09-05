@@ -349,13 +349,16 @@ def _count_loops(inv: np.ndarray) -> int:
 
 
 def read_digit(region: np.ndarray, model,
-               page_white: float = 200.0) -> tuple[str, float, str]:
+               page_white: float = 200.0,
+               _crops: list | None = None) -> tuple[str, float, str]:
     """
     Predict the handwritten digit in *region* using TTA.
     Returns:
       ("",  0.0,  reason) — box is empty
       ("?", conf, reason) — model uncertain (conf < CONFIDENCE_THRESHOLD)
       ("3", 0.97, reason) — predicted digit with confidence
+
+    If _crops is a list, appends (raw_crop_bgr, bin28_gray, digit, reason) for visualisation.
     """
     import torch, torch.nn.functional as F
     import torchvision.transforms.functional as TF
@@ -365,7 +368,10 @@ def read_digit(region: np.ndarray, model,
     # Relative-darkness check first: avoids Otsu splitting a light/empty box
     # into ~50% "dark" pixels which the CNN then misclassifies as "8".
     if rd < DIGIT_BLANK_REL:
-        return "", 0.0, f"blank(rd={rd:.3f})"
+        reason = f"blank(rd={rd:.3f})"
+        if _crops is not None:
+            _crops.append((region.copy(), None, "", reason))
+        return "", 0.0, reason
 
     gray   = _to_gray(region)
     _, inv = cv2.threshold(gray, 0, 255,
@@ -373,20 +379,29 @@ def read_digit(region: np.ndarray, model,
 
     pixel_ratio = float((inv > 0).mean())
     if pixel_ratio < BLANK_THRESHOLD:
-        return "", 0.0, f"blank(pix={pixel_ratio:.3f})"
+        reason = f"blank(pix={pixel_ratio:.3f})"
+        if _crops is not None:
+            _crops.append((region.copy(), None, "", reason))
+        return "", 0.0, reason
 
     # Noise rejection via connected components: salt-and-pepper noise produces
     # many tiny disconnected blobs; a real digit has 1-3 large components.
     n_labels, _, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
     areas = stats[1:, cv2.CC_STAT_AREA]   # skip background (label 0)
     if len(areas) == 0:
-        return "", 0.0, "blank(no blobs)"
+        reason = "blank(no blobs)"
+        if _crops is not None:
+            _crops.append((region.copy(), None, "", reason))
+        return "", 0.0, reason
     max_blob = int(areas.max())
     total_on = int((inv > 0).sum())
     n_blobs  = len(areas)
     # Reject if the largest blob is too small OR noise dominates (many blobs, none big)
     if max_blob < 25 or (n_blobs > 12 and max_blob < total_on * 0.30):
-        return "", 0.0, f"noise(blobs={n_blobs},max={max_blob})"
+        reason = f"noise(blobs={n_blobs},max={max_blob})"
+        if _crops is not None:
+            _crops.append((region.copy(), None, "", reason))
+        return "", 0.0, reason
 
     base = cv2.resize(inv, (28, 28), interpolation=cv2.INTER_AREA)
     t0   = _preprocess(base)
@@ -416,12 +431,112 @@ def read_digit(region: np.ndarray, model,
             alt_p = avg_probs[alt].item()
             if alt_p > 0.05:   # any non-trivial mass on 6/9 is enough given topology
                 d, conf = alt, alt_p
-                return str(d), float(conf), f"rd={rd:.3f},conf={conf:.2f},loop→{d}"
+                reason = f"rd={rd:.3f},conf={conf:.2f},loop→{d}"
+                if _crops is not None:
+                    _crops.append((region.copy(), base.copy(), str(d), reason))
+                return str(d), float(conf), reason
 
     reason = f"rd={rd:.3f},conf={conf:.2f}"
     if conf < CONFIDENCE_THRESHOLD:
-        return "?", conf, f"low_conf({d}@{conf:.2f},rd={rd:.3f})"
+        reason = f"low_conf({d}@{conf:.2f},rd={rd:.3f})"
+        if _crops is not None:
+            _crops.append((region.copy(), base.copy(), "?", reason))
+        return "?", conf, reason
+
+    if _crops is not None:
+        _crops.append((region.copy(), base.copy(), str(d), reason))
     return str(d), float(conf), reason
+
+
+def build_digit_debug_image(results: dict) -> np.ndarray:
+    """Build a BGR grid image showing, per numeric question, each digit box:
+    left half = raw crop from warped sheet, right half = 28×28 model input.
+    """
+    CELL_H   = 56          # height for each crop panel
+    CELL_W28 = 56          # width for the 28×28 panel (square)
+    PAD      = 6           # gap between panels and between digits
+    HDR_H    = 22          # header row height (question label + value)
+    Q_W      = 90          # left column: question label
+    BG       = (245, 245, 245)
+    FONT     = cv2.FONT_HERSHEY_SIMPLEX
+
+    # Collect only numeric questions that have debug crops
+    rows_data = []
+    for key in sorted(results.get("answers", {})):
+        val = results["answers"][key]
+        if val.get("type") != "numeric":
+            continue
+        crops = val.get("_crops", [])
+        if not crops:
+            continue
+        rows_data.append((key, val.get("value") or "(blank)", crops))
+
+    if not rows_data:
+        blank = np.full((80, 400, 3), 245, dtype=np.uint8)
+        cv2.putText(blank, "no digit crops", (10, 50), FONT, 0.6, (100, 100, 100), 1)
+        return blank
+
+    # Compute max row width
+    max_n = max(len(crops) for _, _, crops in rows_data)
+    cell_w_raw = CELL_H * 2   # raw crop scaled to CELL_H height, assume ~2:1 aspect
+    col_w = cell_w_raw + PAD + CELL_W28 + PAD   # one digit column
+    img_w = Q_W + max_n * col_w + PAD
+    row_h = HDR_H + CELL_H + PAD
+
+    strips = []
+    for q_label, value, crops in rows_data:
+        strip = np.full((row_h, img_w, 3), BG, dtype=np.uint8)
+
+        # Question header
+        hdr = f"{q_label} = {value}"
+        cv2.putText(strip, hdr, (4, HDR_H - 5), FONT, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+
+        x = Q_W
+        for raw_bgr, bin28, digit, reason in crops:
+            # ── Raw crop ────────────────────────────────────────────────────
+            rh, rw = raw_bgr.shape[:2]
+            scale_r = CELL_H / max(rh, 1)
+            new_rw  = max(1, int(rw * scale_r))
+            raw_s   = cv2.resize(raw_bgr, (new_rw, CELL_H))
+            # draw into strip (clip if wider than cell_w_raw)
+            draw_w = min(new_rw, cell_w_raw)
+            strip[HDR_H: HDR_H + CELL_H, x: x + draw_w] = raw_s[:, :draw_w]
+            # thin border
+            cv2.rectangle(strip, (x, HDR_H), (x + draw_w - 1, HDR_H + CELL_H - 1),
+                          (180, 180, 180), 1)
+
+            # ── 28×28 model input ────────────────────────────────────────────
+            x28 = x + cell_w_raw + PAD
+            if bin28 is not None:
+                # white-on-black → invert to black-on-white for display
+                disp28 = cv2.resize(255 - bin28, (CELL_W28, CELL_H),
+                                    interpolation=cv2.INTER_NEAREST)
+                disp28_bgr = cv2.cvtColor(disp28, cv2.COLOR_GRAY2BGR)
+                strip[HDR_H: HDR_H + CELL_H, x28: x28 + CELL_W28] = disp28_bgr
+            else:
+                # blank box — grey fill
+                strip[HDR_H: HDR_H + CELL_H, x28: x28 + CELL_W28] = (210, 210, 210)
+            cv2.rectangle(strip, (x28, HDR_H), (x28 + CELL_W28 - 1, HDR_H + CELL_H - 1),
+                          (180, 180, 180), 1)
+
+            # ── Digit label (top of cell pair) ───────────────────────────────
+            label_color = (0, 140, 0) if digit not in ("", "?") else \
+                          (0, 0, 180) if digit == "?" else (120, 120, 120)
+            label = digit if digit not in ("",) else "_"
+            cv2.putText(strip, label, (x + 2, HDR_H - 3),
+                        FONT, 0.55, label_color, 1, cv2.LINE_AA)
+
+            x += col_w
+
+        strips.append(strip)
+
+    # Separator line between questions
+    sep = np.full((2, img_w, 3), 200, dtype=np.uint8)
+    out_rows = []
+    for s in strips:
+        out_rows.append(s)
+        out_rows.append(sep)
+    return np.vstack(out_rows[:-1])   # drop trailing separator
 
 
 # ── High-level box readers ────────────────────────────────────────────────────
@@ -514,7 +629,7 @@ def read_all_boxes(
     for b in layout.get("num_boxes", []):
         q   = b["q"]
         pos = b["digit"]
-        num_by_q.setdefault(q, {"digits": {}, "decimal_pos": None, "debug": []})
+        num_by_q.setdefault(q, {"digits": {}, "decimal_pos": None, "debug": [], "_crops": []})
 
         student_dec   = num_by_q[q]["decimal_pos"]           # set if student dot found
         pre_dec_digit = _dec_box[q]["digit"] if q in _dec_box else None
@@ -533,7 +648,8 @@ def read_all_boxes(
                 plain = extract_region(warped, b["x_mm"], b["y_mm"],
                                        b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
                 if digit_model is not None:
-                    d, conf, reason = read_digit(plain, digit_model, page_white)
+                    d, conf, reason = read_digit(plain, digit_model, page_white,
+                                                 _crops=num_by_q[q]["_crops"])
                 else:
                     rd = relative_darkness(plain, page_white)
                     d = "?" if rd > BLANK_THRESHOLD else ""
@@ -590,7 +706,8 @@ def read_all_boxes(
             region = extract_region(warped, x_mm, b["y_mm"],
                                     w_mm, b["h_mm"], scale, inner_frac=0.05)
             if digit_model is not None:
-                d, conf, reason = read_digit(region, digit_model, page_white)
+                d, conf, reason = read_digit(region, digit_model, page_white,
+                                             _crops=num_by_q[q]["_crops"])
             else:
                 ratio = relative_darkness(region, page_white)
                 d = "?" if ratio > BLANK_THRESHOLD else ""
@@ -632,6 +749,7 @@ def read_all_boxes(
             "digits": sorted_digits,
             "value": value,
             "debug": info.get("debug", []),
+            "_crops": info.get("_crops", []),
         }
 
     return {"student_id": student_id, "answers": answers}

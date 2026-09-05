@@ -365,9 +365,22 @@ def main() -> None:
         results["sheet_id"] = layout.get("sheet_id", "")
 
         results_path = args.results or stem + "_results.json"
+        # Strip non-serialisable crop arrays before JSON dump
+        json_results = {k: v for k, v in results.items() if k != "answers"}
+        json_results["answers"] = {
+            qk: {ek: ev for ek, ev in qv.items() if ek != "_crops"}
+            for qk, qv in results["answers"].items()
+        }
         with open(results_path, "w") as f:
-            json.dump(results, f, indent=2)
+            json.dump(json_results, f, indent=2)
         print(f"Results saved        : {results_path}")
+
+        # Save digit visualisation image
+        from reader import build_digit_debug_image
+        dbg_img = build_digit_debug_image(results)
+        dbg_path = stem + "_digits.jpg"
+        cv2.imwrite(dbg_path, dbg_img)
+        print(f"Digit debug image    : {dbg_path}")
 
         # Print summary
         print(f"\n  Student ID : {results['student_id'] or '(blank)'}")
