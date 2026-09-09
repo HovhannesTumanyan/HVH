@@ -625,9 +625,9 @@ def read_all_boxes(
     id_digits = []
     for b in sorted(layout.get("id_boxes", []), key=lambda x: x["digit"]):
         enh_region  = extract_region(warped_enh, b["x_mm"], b["y_mm"],
-                                     b["w_mm"], b["h_mm"], scale)
+                                     b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
         orig_region = extract_region(warped, b["x_mm"], b["y_mm"],
-                                     b["w_mm"], b["h_mm"], scale)
+                                     b["w_mm"], b["h_mm"], scale, inner_frac=0.05)
         if digit_model is not None:
             enh_rd = relative_darkness(enh_region, page_white)
             force = enh_rd >= DIGIT_BLANK_REL
@@ -775,9 +775,9 @@ def read_all_boxes(
             w_mm = b["w_mm"] + left_ext
             # Pre-check with enhanced image; feed original to CNN
             enh_region  = extract_region(warped_enh, x_mm, b["y_mm"],
-                                         w_mm, b["h_mm"], scale, inner_frac=0.10)
+                                         w_mm, b["h_mm"], scale, inner_frac=0.05)
             orig_region = extract_region(warped, x_mm, b["y_mm"],
-                                         w_mm, b["h_mm"], scale, inner_frac=0.10)
+                                         w_mm, b["h_mm"], scale, inner_frac=0.05)
             enh_rd = relative_darkness(enh_region, page_white)
             if digit_model is not None:
                 force = enh_rd >= DIGIT_BLANK_REL
