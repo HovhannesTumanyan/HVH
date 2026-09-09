@@ -6,16 +6,35 @@ Generate a blank answer sheet and, optionally, a filled answer-key PDF.
 
 Usage examples
 --------------
-  # Blank sheet only
-  python3 main.py questions.txt
+  # From a JSON file (title/variant/date/answers embedded)
+  python3 main.py exam.json
 
-  # Blank sheet + answer key
+  # From plain-text files
+  python3 main.py questions.txt
   python3 main.py questions.txt --answers answers.txt
 
   # Full options
   python3 main.py questions.txt --answers answers.txt \\
       --title "Mathematics Exam" --variant B --date 2026-08-24 \\
       --output sheet.pdf --key-output key.pdf --shuffle
+
+JSON file format
+----------------
+  {
+    "title":     "Mathematics Exam",      // optional
+    "variant":   "A",                     // optional
+    "date":      "2026-09-08",            // optional
+    "shuffle":   false,                   // optional
+    "questions": [
+      {"type": "mcq",     "options": 4},
+      {"type": "mcq",     "options": 3},
+      {"type": "numeric", "digits":  4},
+      {"type": "numeric", "digits":  5, "decimal": 2}
+    ],
+    "answers": ["b", "a", "1234", "12.34"]   // optional
+  }
+
+  Answers can also be per-question: {"type": "mcq", "options": 4, "answer": "b"}
 
 Questions file format (one line per question)
 ---------------------------------------------
@@ -44,6 +63,7 @@ from answer_sheet_gen import (
     generate,
     parse_questions_file,
     parse_answers_file,
+    parse_json_file,
     report_capacity,
 )
 
@@ -56,7 +76,7 @@ def main() -> None:
         epilog=__doc__,
     )
     p.add_argument("questions",
-                   help="Questions definition file (.txt)")
+                   help="Questions file: .json (preferred) or plain-text .txt")
     p.add_argument("--answers", "-a", metavar="FILE",
                    help="Answers file (.txt) — also generates a filled answer-key PDF")
     p.add_argument("--title",   "-t", default="Test",
@@ -76,20 +96,31 @@ def main() -> None:
 
     args = p.parse_args()
 
-    # ── Parse question file ──────────────────────────────────────────────────
-    try:
-        questions, file_shuffle = parse_questions_file(args.questions)
-    except Exception as e:
-        sys.exit(f"Error reading questions file: {e}")
+    # ── Parse question file (JSON or plain-text) ────────────────────────────
+    qpath = args.questions
+    json_meta: dict = {}
 
-    shuffle = file_shuffle or args.shuffle   # CLI --shuffle can force True
-    print(f"Loaded {len(questions)} questions from '{args.questions}' (shuffle={shuffle})")
+    if qpath.lower().endswith(".json"):
+        try:
+            questions, file_shuffle, json_answers, json_meta = parse_json_file(qpath)
+        except Exception as e:
+            sys.exit(f"Error reading JSON file: {e}")
+        answers_from_json = json_answers  # may be None
+    else:
+        try:
+            questions, file_shuffle = parse_questions_file(qpath)
+        except Exception as e:
+            sys.exit(f"Error reading questions file: {e}")
+        answers_from_json = None
+
+    shuffle = file_shuffle or args.shuffle
+    print(f"Loaded {len(questions)} questions from '{qpath}' (shuffle={shuffle})")
 
     if args.capacity:
         report_capacity(questions)
         return
 
-    # ── Parse answers file (optional) ────────────────────────────────────────
+    # ── Resolve answers: CLI file > JSON embedded > none ─────────────────────
     answers = None
     if args.answers:
         try:
@@ -97,11 +128,19 @@ def main() -> None:
         except Exception as e:
             sys.exit(f"Error reading answers file: {e}")
         print(f"Loaded {len(answers)} answers from '{args.answers}'")
+    elif answers_from_json:
+        answers = answers_from_json
+        print(f"Loaded {len(answers)} answers from JSON")
+
+    # CLI flags override JSON metadata; JSON metadata overrides argparse defaults
+    title   = args.title   if args.title   != "Test" else json_meta.get("title",   args.title)
+    variant = args.variant if args.variant != "A"    else json_meta.get("variant", args.variant)
+    date    = args.date    if args.date    != ""     else json_meta.get("date",    args.date)
 
     common = dict(
-        test_title=args.title,
-        variant=args.variant,
-        date=args.date,
+        test_title=title,
+        variant=variant,
+        date=date,
         shuffle=shuffle,
     )
 

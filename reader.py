@@ -137,6 +137,8 @@ def is_decimal_dot(region: np.ndarray, page_white: float) -> bool:
 
 CONFIDENCE_THRESHOLD = 0.45   # below this → return "?" (flag for review)
 TTA_N = 8                      # number of augmented predictions to average
+NUM_CLASSES  = 11              # 0-9 digits + 10=blank
+BLANK_CLASS  = 10
 
 def _build_model():
     import torch.nn as nn
@@ -176,7 +178,7 @@ def _build_model():
             self.head   = nn.Sequential(
                 nn.Flatten(),
                 nn.Dropout(0.4),
-                nn.Linear(256, 10),
+                nn.Linear(256, NUM_CLASSES),
             )
         def forward(self, x):
             x = self.stem(x)
@@ -336,8 +338,13 @@ def load_digit_model():
     model = _build_model()
     if not MODEL_PATH.exists():
         _train_and_save()
-    model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu",
-                                      weights_only=True))
+    state = torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
+    # Migrate old 10-class checkpoint to 11-class (add blank output neuron)
+    w_key, b_key = "head.2.weight", "head.2.bias"
+    if state[w_key].shape[0] == 10:
+        state[w_key] = torch.cat([state[w_key], torch.zeros(1, 256)], dim=0)
+        state[b_key] = torch.cat([state[b_key], torch.tensor([-5.0])],  dim=0)
+    model.load_state_dict(state)
     model.eval()
     _model_cache = model
     return model
@@ -444,6 +451,17 @@ def read_digit(region: np.ndarray, model,
 
     d    = avg_probs.argmax().item()
     conf = avg_probs[d].item()
+
+    # CNN blank class: if model strongly predicts blank, honour it
+    if d == BLANK_CLASS and conf > 0.50:
+        reason = f"cnn_blank(conf={conf:.2f},rd={rd:.3f})"
+        _store(base.copy(), "", reason)
+        return "", conf, reason
+
+    # If model predicts blank but not confidently, fall through to digit classes
+    if d == BLANK_CLASS:
+        d    = int(avg_probs[:BLANK_CLASS].argmax().item())
+        conf = avg_probs[d].item()
 
     # Topology override: "3" and "5" never have a closed loop; "6" and "9" always do.
     # If the model prefers 3/5 but the image has a topological hole, pick 6 or 9
@@ -734,7 +752,7 @@ def read_all_boxes(
                 if (student_dec is not None
                         and pre_dec_digit is not None
                         and student_dec < pre_dec_digit):
-                    left_ext = 1.0          # student decimal earlier → no offset
+                    left_ext = 0.0          # student decimal earlier → no offset
                 else:
                     dec = _dec_box.get(q)
                     if dec is not None:
@@ -751,15 +769,15 @@ def read_all_boxes(
                     else:
                         left_ext = 4.0
             else:
-                left_ext = 1.0
+                left_ext = 0.0
 
             x_mm = b["x_mm"] - left_ext
             w_mm = b["w_mm"] + left_ext
             # Pre-check with enhanced image; feed original to CNN
             enh_region  = extract_region(warped_enh, x_mm, b["y_mm"],
-                                         w_mm, b["h_mm"], scale, inner_frac=0.05)
+                                         w_mm, b["h_mm"], scale, inner_frac=0.10)
             orig_region = extract_region(warped, x_mm, b["y_mm"],
-                                         w_mm, b["h_mm"], scale, inner_frac=0.05)
+                                         w_mm, b["h_mm"], scale, inner_frac=0.10)
             enh_rd = relative_darkness(enh_region, page_white)
             if digit_model is not None:
                 force = enh_rd >= DIGIT_BLANK_REL

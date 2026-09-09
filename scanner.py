@@ -304,6 +304,8 @@ def main() -> None:
                         help="Answers JSON output (default: <photo>_results.json)")
     parser.add_argument("--no-read", action="store_true",
                         help="Skip box reading — only annotate and write coords")
+    parser.add_argument("--save-crops", action="store_true",
+                        help="Save non-blank digit crops to labeled_crops/pending/ for labeling")
     args = parser.parse_args()
 
     img = cv2.imread(args.photo)
@@ -381,6 +383,44 @@ def main() -> None:
         dbg_path = stem + "_digits.jpg"
         cv2.imwrite(dbg_path, dbg_img)
         print(f"Digit debug image    : {dbg_path}")
+
+        # Save digit crops for labeling
+        if args.save_crops:
+            import re
+            crops_dir = Path("labeled_crops") / "pending"
+            crops_dir.mkdir(parents=True, exist_ok=True)
+            n_saved = 0
+            for qk, qv in results["answers"].items():
+                if qv.get("type") != "numeric":
+                    continue
+                for i, crop_tuple in enumerate(qv.get("_crops", [])):
+                    orig_bgr, enh_bgr, bin28, digit, reason = crop_tuple
+                    if orig_bgr is None or orig_bgr.size == 0:
+                        continue
+                    m = re.search(r'conf=(\d+\.\d+)', reason)
+                    conf_str = f"_c{int(float(m.group(1))*100):02d}" if m else ""
+                    pred_tag = digit if digit not in ("", "?") else \
+                               "blank" if digit == "" else "unk"
+                    fname = f"{stem}_{qk}_d{i:02d}_pred{pred_tag}{conf_str}.png"
+                    cv2.imwrite(str(crops_dir / fname), orig_bgr)
+                    n_saved += 1
+            # Save decimal indicator crops separately
+            from reader import extract_region, enhance_contrast
+            warped_enh_local = enhance_contrast(warped)
+            with open(args.layout) as _lf:
+                _layout_dec = json.load(_lf)
+            for b in _layout_dec.get("num_boxes", []):
+                if not b.get("is_decimal"):
+                    continue
+                qk = f"Q{b['q']:02d}"
+                reg = extract_region(warped, b["x_mm"], b["y_mm"],
+                                     b["w_mm"], b["h_mm"], args.scale, inner_frac=0.05)
+                if reg is None or reg.size == 0:
+                    continue
+                fname = f"{stem}_{qk}_decimal_predpoint.png"
+                cv2.imwrite(str(crops_dir / fname), reg)
+                n_saved += 1
+            print(f"Crops saved          : {n_saved} → {crops_dir}/")
 
         # Print summary
         print(f"\n  Student ID : {results['student_id'] or '(blank)'}")

@@ -28,6 +28,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PAGE & ZONE CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -76,9 +77,10 @@ GRID_Q_W      = (CW - GRID_LBL_W) / QUES_PER_ROW   # exact column width
 GRID_SEC_GAP  = 5.0 * mm     # vertical gap between any two sections
 
 # ── Numeric question boxes ─────────────────────────────────────────────────────
-NUM_BOX_W       = 5.8 * mm   # each digit box width
-NUM_BOX_H       = 8.0 * mm   # each digit box height
-NUM_BOX_GAP     = 0.8 * mm   # gap between boxes
+_CHECKBOX_SIDE  = min(GRID_Q_W, GRID_OPT_H) - 1.4 * mm  # MCQ tick-box square side
+NUM_BOX_W       = 2 * _CHECKBOX_SIDE   # digit box = 2× MCQ checkbox
+NUM_BOX_H       = 8.0 * mm
+NUM_BOX_GAP     = 1.5 * mm   # gap between boxes
 NUM_DOT_BOX_W   = NUM_BOX_W  # decimal-point box same size as digit boxes
 NUM_Q_LBL_W    = 10.0 * mm  # width of "Q." label
 NUM_ROW_H       = NUM_BOX_H + 3.5 * mm   # total height per numeric row
@@ -158,21 +160,22 @@ def _max_row_width(rows: list[list[tuple]]) -> float:
     return max_w
 
 
-def _pack_rows(questions: list[NumericQuestion], width: float) -> list[list[tuple]]:
+def _fill_rows(
+    indexed: list[tuple[int, NumericQuestion]],
+    width: float,
+    max_rows: int | None = None,
+) -> list[list[tuple]]:
     """
-    Pack numeric questions into rows using best-fit (skip-and-fill gaps).
-    Each entry is (q, x_offset, orig_idx) where orig_idx is the question's
-    position in the *input* list.  This lets drawing code assign the correct
-    label regardless of visual packing order.
+    Core row-packing loop shared by _pack_rows and _pack_in_panel.
+    Each entry is (q, x_offset, orig_idx).
     """
-    # remaining holds (orig_idx, q) so we can recover the original position
-    remaining: list[tuple[int, NumericQuestion]] = list(enumerate(questions))
+    remaining = list(indexed)
     rows: list[list[tuple]] = []
 
-    while remaining:
+    while remaining and (max_rows is None or len(rows) < max_rows):
         row: list[tuple] = []
         x = 0.0
-        placed: set[int] = set()   # positions in `remaining` that were placed
+        placed: set[int] = set()
 
         for list_pos, (orig_idx, q) in enumerate(remaining):
             q_w = NUM_Q_LBL_W + q.content_width()
@@ -185,9 +188,7 @@ def _pack_rows(questions: list[NumericQuestion], width: float) -> list[list[tupl
         remaining = [item for pos, item in enumerate(remaining) if pos not in placed]
         if not row:
             break
-        # Sort by orig_idx so labels increase left-to-right even after gap-filling
         row.sort(key=lambda t: t[2])
-        # Recompute x_offsets to match sorted visual order
         reordered, x = [], 0.0
         for q, _, orig_idx in row:
             gap = _NUM_Q_GAP if reordered else 0.0
@@ -198,47 +199,21 @@ def _pack_rows(questions: list[NumericQuestion], width: float) -> list[list[tupl
     return rows
 
 
+def _pack_rows(questions: list[NumericQuestion], width: float) -> list[list[tuple]]:
+    return _fill_rows(list(enumerate(questions)), width)
+
+
 def _pack_in_panel(
     questions: list[NumericQuestion],
     panel_w: float,
     panel_h: float,
 ) -> tuple[list[list[tuple]], int]:
-    """
-    Pack as many questions as fit in a panel of (panel_w × panel_h).
-    Returns (rows, n_placed) where each row entry is (q, x_offset, orig_idx).
-    """
     max_rows = max(1, int(panel_h / NUM_ROW_H))
-    rows: list[list[tuple]] = []
     eligible = [(i, q) for i, q in enumerate(questions)
                 if NUM_Q_LBL_W + q.content_width() <= panel_w]
-    remaining = list(eligible)   # (orig_idx, q)
-
-    while remaining and len(rows) < max_rows:
-        row: list[tuple] = []
-        x = 0.0
-        placed: set[int] = set()
-
-        for list_pos, (orig_idx, q) in enumerate(remaining):
-            q_w = NUM_Q_LBL_W + q.content_width()
-            gap = _NUM_Q_GAP if row else 0.0
-            if x + gap + q_w <= panel_w:
-                row.append((q, x + gap, orig_idx))
-                x += gap + q_w
-                placed.add(list_pos)
-
-        remaining = [item for pos, item in enumerate(remaining) if pos not in placed]
-        if not row:
-            break
-        row.sort(key=lambda t: t[2])
-        reordered, x = [], 0.0
-        for q, _, orig_idx in row:
-            gap = _NUM_Q_GAP if reordered else 0.0
-            reordered.append((q, x + gap, orig_idx))
-            x += gap + NUM_Q_LBL_W + q.content_width()
-        rows.append(reordered)
-
+    rows = _fill_rows(eligible, panel_w, max_rows=max_rows)
     placed_ids = {id(q) for r in rows for q, _, _ in r}
-    n_placed = sum(1 for q in questions if id(q) in placed_ids)
+    n_placed   = sum(1 for q in questions if id(q) in placed_ids)
     return rows, n_placed
 
 
@@ -336,6 +311,8 @@ def _plan_layout(questions: list[Question]) -> list[dict]:
                     if pw > NUM_Q_LBL_W:
                         side_rows, n_side = _pack_in_panel(questions[j:k], pw, mcq_h)
 
+                band_h = mcq_h
+
                 # After placing numeric in side panel, check if MCQ fits further right
                 side_mcq2, side_mcq2_q0, side_mcq2_x, side_num_nat_w = [], 0, CR, 0
                 if side_rows:
@@ -385,13 +362,13 @@ def _plan_layout(questions: list[Question]) -> list[dict]:
             while j < n and isinstance(questions[j], NumericQuestion):
                 j += 1
             run  = questions[i:j]
-            rows = _pack_rows(run, CW)
+            rows  = _pack_rows(run, CW)
+            nat_w = _max_row_width(rows)
             num_h = len(rows) * NUM_ROW_H
 
-            # Try placing MCQ to the right when next segment is MCQ
-            side_mcq, n_mcq_side, side_mcq_q0, num_draw_w = [], 0, 0, CW
+            # Border fits tightly around content; MCQ fills remaining width
+            side_mcq, n_mcq_side, side_mcq_q0, num_draw_w = [], 0, 0, nat_w
             if j < n and isinstance(questions[j], MCQQuestion):
-                nat_w  = _max_row_width(rows)        # width naturally used
                 panel_w = CW - nat_w - _NUM_PANEL_GAP
                 mcq_cols = int((panel_w - GRID_LBL_W) / GRID_Q_W) if panel_w > GRID_LBL_W else 0
                 if mcq_cols >= 1:
@@ -405,7 +382,6 @@ def _plan_layout(questions: list[Question]) -> list[dict]:
                         side_mcq     = chunk
                         n_mcq_side   = len(chunk)
                         side_mcq_q0  = q_num + len(run)
-                        num_draw_w   = nat_w
                         rows = _pack_rows(run, nat_w)   # repack tighter
                         # band height expands if MCQ is taller than numeric rows
                         num_h = max(num_h, mcq_h)
@@ -426,12 +402,13 @@ def _plan_layout(questions: list[Question]) -> list[dict]:
     return bands
 
 
-def _height_used(questions: list[Question]) -> float:
-    return HEADER_H + sum(b['height'] + GRID_SEC_GAP for b in _plan_layout(questions))
+def _height_used(questions: list[Question], bands: list[dict] | None = None) -> float:
+    bands = bands if bands is not None else _plan_layout(questions)
+    return HEADER_H + sum(b['height'] + GRID_SEC_GAP for b in bands)
 
 
-def capacity_info(questions: list[Question]) -> dict:
-    used  = _height_used(questions)
+def capacity_info(questions: list[Question], bands: list[dict] | None = None) -> dict:
+    used  = _height_used(questions, bands)
     avail = CH - used
     rem_mcq = max(0, int(avail / (_mcq_section_h(4) + GRID_SEC_GAP) * QUES_PER_ROW))
     _sw  = NUM_Q_LBL_W + NumericQuestion(n_digits=4).content_width() + _NUM_Q_GAP
@@ -545,6 +522,86 @@ def parse_answers_file(path: str, questions: list[Question]) -> dict[int, str]:
         else:
             answers[i] = ans
     return answers
+
+
+def parse_json_file(path: str) -> tuple[list[Question], bool, dict | None, dict]:
+    """
+    Parse a JSON test definition file.
+
+    Minimal format:
+        { "questions": [ {"type": "mcq", "options": 4}, ... ] }
+
+    Full format:
+        {
+          "title":     "Exam title",      // optional — passed to generate()
+          "variant":   "A",               // optional
+          "date":      "2026-09-08",      // optional
+          "shuffle":   false,             // optional, default false
+          "questions": [
+            {"type": "mcq",     "options": 4},
+            {"type": "mcq",     "options": 3},
+            {"type": "numeric", "digits":  4},
+            {"type": "numeric", "digits":  5, "decimal": 2}
+          ],
+          "answers": ["b", "a", "1234", "12.34"]  // optional; or per-question "answer" field
+        }
+
+    Returns (questions, shuffle, answers_dict_or_None, meta_dict).
+    meta_dict contains "title", "variant", "date" if present in the file.
+    answers_dict maps 1-based question number → answer string.
+    """
+    import json as _json
+
+    with open(path) as f:
+        data = _json.load(f)
+
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: top-level value must be an object")
+    if "questions" not in data:
+        raise ValueError(f"{path}: missing required key \"questions\"")
+
+    shuffle: bool = bool(data.get("shuffle", False))
+    meta: dict = {k: data[k] for k in ("title", "variant", "date") if k in data}
+
+    questions: list[Question] = []
+    inline_answers: list[str | None] = []
+
+    for i, item in enumerate(data["questions"], 1):
+        if not isinstance(item, dict):
+            raise ValueError(f"{path}: question {i} must be an object")
+        qtype = item.get("type", "").lower()
+        if qtype == "mcq":
+            n = int(item.get("options", 4))
+            q = MCQQuestion(n_options=n)
+        elif qtype == "numeric":
+            digits  = int(item.get("digits", 4))
+            decimal = int(item.get("decimal", 0))
+            q = NumericQuestion(
+                n_digits=digits,
+                has_decimal=(decimal > 0),
+                decimal_pos=decimal if decimal > 0 else 2,
+            )
+        else:
+            raise ValueError(f"{path}: question {i} has unknown type {item.get('type')!r}"
+                             " — use \"mcq\" or \"numeric\"")
+        q.validate()
+        questions.append(q)
+        inline_answers.append(item.get("answer"))
+
+    if not questions:
+        raise ValueError(f"{path}: no questions found")
+
+    # Build answers dict — top-level array takes priority over inline fields
+    answers: dict[int, str] | None = None
+    top_answers = data.get("answers")
+    if top_answers is not None:
+        if not isinstance(top_answers, list):
+            raise ValueError(f"{path}: \"answers\" must be an array")
+        answers = {i: str(a) for i, a in enumerate(top_answers, 1) if a is not None}
+    elif any(a is not None for a in inline_answers):
+        answers = {i: str(a) for i, a in enumerate(inline_answers, 1) if a is not None}
+
+    return questions, shuffle, answers, meta
 
 
 def _answer_to_boxes(ans_str: str, q: NumericQuestion) -> dict:
@@ -916,34 +973,43 @@ _DIGIT_STROKES: dict[int, list[list[tuple[float, float]]]] = {
 
 def _mnist_digit_image(digit: int, w_mm: float, h_mm: float) -> ImageReader:
     """Render digit as an MNIST-style thick-stroke image and return an ImageReader."""
+    buf = io.BytesIO(_mnist_digit_png(digit, w_mm, h_mm))
+    return ImageReader(buf)
+
+
+def _mnist_digit_png(digit: int, w_mm: float, h_mm: float) -> bytes:
+    """Return PNG bytes for the digit — cached since the guide always uses the same sizes."""
+    key = (digit, round(w_mm, 3), round(h_mm, 3))
+    cached = _PNG_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     dpi   = 220
     w_px  = max(24, int(w_mm / 25.4 * dpi))
     h_px  = max(32, int(h_mm / 25.4 * dpi))
-    sw    = max(3, int(min(w_px, h_px) * 0.14))   # stroke width
+    sw    = max(3, int(min(w_px, h_px) * 0.14))
 
     img  = _PILImage.new("L", (w_px, h_px), 255)
     draw = _PILDraw.Draw(img)
-
     pad_x = w_px * 0.12
     pad_y = h_px * 0.06
     dw    = w_px - 2 * pad_x
     dh    = h_px - 2 * pad_y
 
     for stroke in _DIGIT_STROKES[digit]:
-        pts = [
-            (int(pad_x + x * dw), int(h_px - pad_y - y * dh))
-            for x, y in stroke
-        ]
+        pts = [(int(pad_x + x * dw), int(h_px - pad_y - y * dh)) for x, y in stroke]
         if len(pts) >= 2:
             draw.line(pts, fill=30, width=sw)
 
-    img = img.filter(_PILFilter.GaussianBlur(radius=sw * 0.45))
-    img = img.convert("RGB")
-
+    img = img.filter(_PILFilter.GaussianBlur(radius=sw * 0.45)).convert("RGB")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    buf.seek(0)
-    return ImageReader(buf)
+    data = buf.getvalue()
+    _PNG_CACHE[key] = data
+    return data
+
+
+_PNG_CACHE: dict[tuple, bytes] = {}
 
 
 def _draw_guide(c: canvas.Canvas) -> None:
@@ -1071,7 +1137,8 @@ def generate(
     for q in questions:
         q.validate()
 
-    cap = capacity_info(questions)
+    bands = _plan_layout(questions)          # compute once; reused for cap, draw, json
+    cap   = capacity_info(questions, bands)
     if not cap["fits"]:
         raise ValueError(
             f"Questions overflow by {-cap['avail_mm']:.1f} mm — reduce question count."
@@ -1112,7 +1179,7 @@ def generate(
     # 5. Question sections
     qa = sheet_answers or None
     y = CT - HEADER_H
-    for band in _plan_layout(questions):
+    for band in bands:
         if band['kind'] == 'mcq':
             _draw_mcq_section(c, y, band['mcq'], band['mcq_q0'],
                               draw_w=band['mcq_draw_w'], q_answers=qa)
@@ -1125,9 +1192,8 @@ def generate(
                     _draw_mcq_section(c, y, band['side_mcq2'], band['side_mcq2_q0'],
                                       x_start=band['side_mcq2_x'], q_answers=qa)
         else:
-            x_right = (CL + band['num_draw_w']) if band['side_mcq'] else None
             _draw_numeric_section(c, y, band['num_rows'], band['num_q0'],
-                                  x_right=x_right, q_answers=qa)
+                                  x_right=CL + band['num_draw_w'], q_answers=qa)
             if band['side_mcq']:
                 _draw_mcq_section(c, y, band['side_mcq'], band['side_mcq_q0'],
                                   x_start=band['side_mcq_x'], q_answers=qa)
@@ -1142,7 +1208,7 @@ def generate(
     # Export box layout JSON (blank sheet only)
     if not is_key:
         layout_json = output.replace(".pdf", "_layout.json")
-        export_layout_json(questions, layout_json, sheet_id=sheet_id)
+        export_layout_json(questions, layout_json, sheet_id=sheet_id, bands=bands)
 
     return output, cap, order, sheet_id
 
@@ -1151,7 +1217,8 @@ def generate(
 # LAYOUT EXPORT  (box positions for the scanner)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def export_layout_json(questions: list[Question], path: str, sheet_id: str = "") -> None:
+def export_layout_json(questions: list[Question], path: str, sheet_id: str = "",
+                       bands: list[dict] | None = None) -> None:
     """
     Write all MCQ checkbox and numeric digit box positions to a JSON file.
 
@@ -1178,8 +1245,9 @@ def export_layout_json(questions: list[Question], path: str, sheet_id: str = "")
     num_boxes: list[dict] = []
 
     y = CT - HEADER_H   # same starting y as generate()
+    bands = bands if bands is not None else _plan_layout(questions)
 
-    for band in _plan_layout(questions):
+    for band in bands:
         if band["kind"] == "mcq":
             # ── main MCQ grid ──────────────────────────────────────────────
             _collect_mcq_boxes(mcq_boxes, band["mcq"], band["mcq_q0"],

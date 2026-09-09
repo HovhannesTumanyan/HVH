@@ -1,0 +1,280 @@
+{
+  "title": "Preview Test Exam",
+  "variant": "A",
+  "date": "2026-10-01",
+  "shuffle": false,
+  "questions": [
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 6
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 6
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 6
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 6
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 6
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 6
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 5
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 6
+    },
+    {
+      "type": "numeric",
+      "digits": 4
+    },
+    {
+      "type": "numeric",
+      "digits": 3
+    }
+  ]
+}
