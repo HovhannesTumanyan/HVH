@@ -48,7 +48,7 @@ def _build_display(img_bgr: np.ndarray) -> np.ndarray:
     enh   = cv2.cvtColor(cv2.merge([clahe.apply(l), a, b]), cv2.COLOR_LAB2BGR)
     enh   = cv2.resize(enh, (S, S))
 
-    gray  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    gray  = cv2.cvtColor(enh, cv2.COLOR_BGR2GRAY)
     _, inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
     bin28 = cv2.resize(inv, (S, S), interpolation=cv2.INTER_NEAREST)
     white_digit = cv2.cvtColor(255 - bin28, cv2.COLOR_GRAY2BGR)

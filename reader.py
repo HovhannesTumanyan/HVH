@@ -408,7 +408,10 @@ def read_digit(region: np.ndarray, model,
         _store(None, "", reason)
         return "", 0.0, reason
 
-    gray   = _to_gray(region)
+    # Use CLAHE-enhanced crop for binarization when available — Otsu on a
+    # low-contrast original frequently washes out faint pencil marks.
+    binarize_src = _enh_crop if _enh_crop is not None else region
+    gray   = _to_gray(binarize_src)
     _, inv = cv2.threshold(gray, 0, 255,
                             cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
