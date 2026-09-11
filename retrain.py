@@ -211,10 +211,15 @@ def retrain(epochs: int = 20, oversample: int = 100,
     val_loader   = DataLoader(ConcatDataset([mnist_val, emnist_val]),
                               batch_size=512, shuffle=False)
 
+    # ── Device ───────────────────────────────────────────────────────────────
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\nDevice: {device}"
+          + (f" ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
+
     # ── Model ────────────────────────────────────────────────────────────────
-    model = _build_model()
+    model = _build_model().to(device)
     if from_scratch:
-        print("\nTraining from scratch…")
+        print("Training from scratch…")
         max_lr = 3e-3
     else:
         if MODEL_PATH.exists():
@@ -229,7 +234,7 @@ def retrain(epochs: int = 20, oversample: int = 100,
             print("Loaded existing weights — fine-tuning…")
         else:
             print("No existing model found — training from scratch…")
-        max_lr = 5e-4   # lower LR for fine-tuning
+        max_lr = 5e-4
 
     # Back up current model before overwriting
     if MODEL_PATH.exists():
@@ -251,6 +256,7 @@ def retrain(epochs: int = 20, oversample: int = 100,
     for epoch in range(epochs):
         model.train()
         for X, y in train_loader:
+            X, y = X.to(device), y.to(device)
             Xm, ya, yb, lam = _mixup(X, y)
             opt.zero_grad()
             out  = model(Xm)
@@ -263,6 +269,7 @@ def retrain(epochs: int = 20, oversample: int = 100,
         correct = total = 0
         with torch.no_grad():
             for X, y in val_loader:
+                X, y = X.to(device), y.to(device)
                 correct += (model(X).argmax(1) == y).sum().item()
                 total   += len(y)
         acc = correct / total
@@ -271,7 +278,8 @@ def retrain(epochs: int = 20, oversample: int = 100,
 
         if acc > best_acc:
             best_acc = acc
-            torch.save(model.state_dict(), MODEL_PATH)
+            torch.save(model.cpu().state_dict(), MODEL_PATH)
+            model.to(device)
 
     print(f"\nBest MNIST+EMNIST val acc : {best_acc:.4f}")
     print(f"Model saved               → {MODEL_PATH}")
