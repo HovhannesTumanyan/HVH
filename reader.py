@@ -357,7 +357,7 @@ def _preprocess(inv: np.ndarray) -> "torch.Tensor":
     return (t - 0.1736) / 0.3317
 
 
-DIGIT_BLANK_REL = 0.005  # relative-darkness below this → digit box is empty
+DIGIT_BLANK_REL = 0.0    # pre-binarisation gate disabled — CNN handles blanks
 
 def _count_loops(inv: np.ndarray) -> int:
     """Count topological holes (closed loops) in a binarized digit image.
@@ -419,20 +419,6 @@ def read_digit(region: np.ndarray, model,
 
     base = cv2.resize(inv, (28, 28), interpolation=cv2.INTER_AREA)
 
-    # Noise rejection: many tiny blobs with no dominant component = paper texture.
-    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
-    areas = stats[1:, cv2.CC_STAT_AREA]   # skip background (label 0)
-    if len(areas) == 0:
-        reason = "blank(no blobs)"
-        _store(base.copy(), "", reason)
-        return "", 0.0, reason
-    max_blob = int(areas.max())
-    total_on = int((inv > 0).sum())
-    n_blobs  = len(areas)
-    if max_blob < 8 or (n_blobs > 20 and max_blob < total_on * 0.20):
-        reason = f"noise(blobs={n_blobs},max={max_blob})"
-        _store(base.copy(), "", reason)
-        return "", 0.0, reason
 
     t0   = _preprocess(base)
 
