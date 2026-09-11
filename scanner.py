@@ -379,12 +379,18 @@ def main() -> None:
             if qk in correct_answers:
                 detected = str(qv.get("answer") or qv.get("value") or "").strip()
                 expected = str(correct_answers[qk]).strip()
-                if not detected:
-                    entry["correct"] = None   # not answered
+                if not detected or detected == "?":
+                    entry["correct"] = None   # not answered / uncertain
                     missing += 1
                 else:
-                    entry["correct"] = (detected == expected)
-                    if detected == expected:
+                    # Numeric: strip leading zeros and compare as numbers
+                    def _norm(s):
+                        try:
+                            return str(float(s)) if "." in s else str(int(s))
+                        except ValueError:
+                            return s.lower()
+                    entry["correct"] = (_norm(detected) == _norm(expected))
+                    if entry["correct"]:
                         correct += 1
                     else:
                         wrong += 1
