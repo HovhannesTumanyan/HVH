@@ -408,10 +408,14 @@ def read_digit(region: np.ndarray, model,
         _store(None, "", reason)
         return "", 0.0, reason
 
-    # Use CLAHE-enhanced crop for binarization when available — Otsu on a
-    # low-contrast original frequently washes out faint pencil marks.
+    # Apply a strong per-crop CLAHE before Otsu so faint pencil marks form a
+    # proper bimodal histogram.  The whole-sheet CLAHE (clip=2) is not enough;
+    # clip=8 on the small crop amplifies local contrast without spreading noise
+    # enough to defeat the blob gate below.
     binarize_src = _enh_crop if _enh_crop is not None else region
     gray   = _to_gray(binarize_src)
+    _clahe_local = cv2.createCLAHE(clipLimit=8.0, tileGridSize=(4, 4))
+    gray   = _clahe_local.apply(gray)
     _, inv = cv2.threshold(gray, 0, 255,
                             cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
