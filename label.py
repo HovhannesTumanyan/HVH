@@ -48,13 +48,12 @@ def _build_display(img_bgr: np.ndarray) -> np.ndarray:
     enh   = cv2.cvtColor(cv2.merge([clahe.apply(l), a, b]), cv2.COLOR_LAB2BGR)
     enh   = cv2.resize(enh, (S, S))
 
-    gray  = cv2.cvtColor(enh, cv2.COLOR_BGR2GRAY)
-    gray  = cv2.createCLAHE(clipLimit=8.0, tileGridSize=(4, 4)).apply(gray)
+    gray  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    p_lo  = float(np.percentile(gray, 2))
+    p_hi  = float(np.percentile(gray, 98))
+    gray  = np.clip((gray.astype(np.float32) - p_lo) / max(p_hi - p_lo, 1.0) * 255.0,
+                    0.0, 255.0).astype(np.uint8)
     _, inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-    if float((inv > 0).mean()) < 0.05:
-        inv = cv2.adaptiveThreshold(gray, 255,
-                                    cv2.ADAPTIVE_THRESH_MEAN_C,
-                                    cv2.THRESH_BINARY_INV, 21, 8)
     bin28 = cv2.resize(inv, (S, S), interpolation=cv2.INTER_NEAREST)
     white_digit = cv2.cvtColor(255 - bin28, cv2.COLOR_GRAY2BGR)
 

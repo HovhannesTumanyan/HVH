@@ -357,7 +357,7 @@ def _preprocess(inv: np.ndarray) -> "torch.Tensor":
     return (t - 0.1736) / 0.3317
 
 
-DIGIT_BLANK_REL = 0.03   # relative-darkness below this → digit box is empty
+DIGIT_BLANK_REL = 0.005  # relative-darkness below this → digit box is empty
 
 def _count_loops(inv: np.ndarray) -> int:
     """Count topological holes (closed loops) in a binarized digit image.
@@ -401,31 +401,26 @@ def read_digit(region: np.ndarray, model,
 
     rd = relative_darkness(region, page_white)
 
-    # Relative-darkness check first: avoids Otsu splitting a light/empty box
-    # into ~50% "dark" pixels which the CNN then misclassifies as "8".
+    # Only short-circuit on truly ink-free boxes; blob gate handles the rest.
     if not _force_read and rd < DIGIT_BLANK_REL:
         reason = f"blank(rd={rd:.3f})"
         _store(None, "", reason)
         return "", 0.0, reason
 
+    # ── Percentile contrast stretch ─────────────────────────────────────────
+    # Map [p2 .. p98] of the crop to [0 .. 255].  This is invariant to
+    # absolute ink brightness: a faint pencil mark that is only 10 grey-level
+    # units darker than paper becomes as vivid as MNIST-quality ink.
+    # Otsu then gets a proper bimodal histogram in every case.
     binarize_src = _enh_crop if _enh_crop is not None else region
     gray   = _to_gray(binarize_src)
-    _clahe_local = cv2.createCLAHE(clipLimit=8.0, tileGridSize=(4, 4))
-    gray   = _clahe_local.apply(gray)
+    p_lo   = float(np.percentile(gray, 2))
+    p_hi   = float(np.percentile(gray, 98))
+    span   = max(p_hi - p_lo, 1.0)
+    gray   = np.clip((gray.astype(np.float32) - p_lo) / span * 255.0,
+                     0.0, 255.0).astype(np.uint8)
     _, inv = cv2.threshold(gray, 0, 255,
                             cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-    # Otsu needs a bimodal histogram; faint pencil marks fail it.  Fall back
-    # to adaptive thresholding (local mean − C) which handles uneven contrast.
-    if float((inv > 0).mean()) < 0.05:
-        inv = cv2.adaptiveThreshold(gray, 255,
-                                    cv2.ADAPTIVE_THRESH_MEAN_C,
-                                    cv2.THRESH_BINARY_INV, 21, 8)
-
-    pixel_ratio = float((inv > 0).mean())
-    if pixel_ratio < BLANK_THRESHOLD:
-        reason = f"blank(pix={pixel_ratio:.3f})"
-        _store(None, "", reason)
-        return "", 0.0, reason
 
     # Noise rejection via connected components: salt-and-pepper noise produces
     # many tiny disconnected blobs; a real digit has 1-3 large components.
