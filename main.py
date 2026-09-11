@@ -85,10 +85,10 @@ def main() -> None:
                    help="Variant letter shown on the sheet (default: A)")
     p.add_argument("--date",    "-d", default="",
                    help="Date string shown on the sheet")
-    p.add_argument("--output",  "-o", default="answer_sheet.pdf",
-                   help="Output PDF for the blank answer sheet (default: answer_sheet.pdf)")
+    p.add_argument("--output",  "-o", default=None,
+                   help="Output PDF for the blank answer sheet (default: <input>_sheet.pdf)")
     p.add_argument("--key-output", "-k", default=None, metavar="FILE",
-                   help="Output PDF for the answer key (default: key_<output>)")
+                   help="Output PDF for the answer key (default: <input>_key.pdf)")
     p.add_argument("--shuffle", "-s", action="store_true",
                    help="Reorder questions for a more compact layout")
     p.add_argument("--capacity", "-c", action="store_true",
@@ -144,10 +144,15 @@ def main() -> None:
         shuffle=shuffle,
     )
 
+    # ── Derive output paths from input filename if not specified ────────────
+    stem = Path(qpath).stem          # e.g. "test_exam"
+    out_pdf = args.output     or f"{stem}_sheet.pdf"
+    key_pdf = args.key_output or f"{stem}_key.pdf"
+
     # ── Generate blank answer sheet ──────────────────────────────────────────
     try:
         path, cap, order, sheet_id = generate(
-            questions, output=args.output, **common
+            questions, output=out_pdf, **common
         )
     except ValueError as e:
         sys.exit(f"Layout error: {e}")
@@ -161,12 +166,11 @@ def main() -> None:
     if not cap["fits"]:
         print(f"WARNING: overflow by {-cap['avail_mm']:.1f} mm")
 
-    # ── Generate answer key PDF ──────────────────────────────────────────────
+    # ── Generate answer key PDF (auto when answers present) ─────────────────
     if answers:
-        key_out = args.key_output or ("key_" + Path(args.output).name)
         try:
             key_path, _, _, _ = generate(
-                questions, output=key_out,
+                questions, output=key_pdf,
                 answers=answers, is_key=True,
                 **common,
             )
