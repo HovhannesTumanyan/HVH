@@ -1208,7 +1208,8 @@ def generate(
     # Export box layout JSON (blank sheet only)
     if not is_key:
         layout_json = output.replace(".pdf", "_layout.json")
-        export_layout_json(questions, layout_json, sheet_id=sheet_id, bands=bands)
+        export_layout_json(questions, layout_json, sheet_id=sheet_id, bands=bands,
+                           answers=sheet_answers if sheet_answers else None)
 
     return output, cap, order, sheet_id
 
@@ -1218,7 +1219,8 @@ def generate(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def export_layout_json(questions: list[Question], path: str, sheet_id: str = "",
-                       bands: list[dict] | None = None) -> None:
+                       bands: list[dict] | None = None,
+                       answers: dict | None = None) -> None:
     """
     Write all MCQ checkbox and numeric digit box positions to a JSON file.
 
@@ -1292,6 +1294,8 @@ def export_layout_json(questions: list[Question], path: str, sheet_id: str = "",
         "num_boxes": num_boxes,
         "id_boxes":  id_boxes,
     }
+    if answers:
+        data["answers"] = {f"Q{int(k):02d}": str(v) for k, v in answers.items()}
     with open(path, "w") as f:
         _json.dump(data, f, indent=2)
 

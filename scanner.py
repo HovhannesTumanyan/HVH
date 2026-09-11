@@ -367,15 +367,46 @@ def main() -> None:
         results["sheet_id"] = layout.get("sheet_id", "")
 
         results_path = args.results or stem + "_results.json"
-        # Strip non-serialisable crop arrays before JSON dump
+
+        # Compare detected answers with correct answers from layout
+        correct_answers = layout.get("answers", {})
+        total = correct = wrong = missing = 0
+
         json_results = {k: v for k, v in results.items() if k != "answers"}
-        json_results["answers"] = {
-            qk: {ek: ev for ek, ev in qv.items() if ek != "_crops"}
-            for qk, qv in results["answers"].items()
-        }
+        json_answers = {}
+        for qk, qv in results["answers"].items():
+            entry = {ek: ev for ek, ev in qv.items() if ek != "_crops"}
+            if qk in correct_answers:
+                detected = str(qv.get("answer") or qv.get("value") or "").strip()
+                expected = str(correct_answers[qk]).strip()
+                if not detected:
+                    entry["correct"] = None   # not answered
+                    missing += 1
+                else:
+                    entry["correct"] = (detected == expected)
+                    if detected == expected:
+                        correct += 1
+                    else:
+                        wrong += 1
+                entry["expected"] = expected
+                total += 1
+            json_answers[qk] = entry
+        json_results["answers"] = json_answers
+
+        if total:
+            json_results["score"] = {
+                "correct": correct,
+                "wrong":   wrong,
+                "missing": missing,
+                "total":   total,
+            }
+
         with open(results_path, "w") as f:
             json.dump(json_results, f, indent=2)
         print(f"Results saved        : {results_path}")
+        if total:
+            print(f"Score                : {correct}/{total}  "
+                  f"(wrong={wrong}, missing={missing})")
 
         # Save digit visualisation image
         from reader import build_digit_debug_image

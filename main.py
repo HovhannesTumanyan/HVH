@@ -152,7 +152,7 @@ def main() -> None:
     # ── Generate blank answer sheet ──────────────────────────────────────────
     try:
         path, cap, order, sheet_id = generate(
-            questions, output=out_pdf, **common
+            questions, output=out_pdf, answers=answers, **common
         )
     except ValueError as e:
         sys.exit(f"Layout error: {e}")
