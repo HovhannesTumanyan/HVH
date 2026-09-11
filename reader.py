@@ -401,17 +401,12 @@ def read_digit(region: np.ndarray, model,
 
     rd = relative_darkness(region, page_white)
 
-    # Only short-circuit on truly ink-free boxes; blob gate handles the rest.
     if not _force_read and rd < DIGIT_BLANK_REL:
         reason = f"blank(rd={rd:.3f})"
         _store(None, "", reason)
         return "", 0.0, reason
 
     # ── Percentile contrast stretch ─────────────────────────────────────────
-    # Map [p2 .. p98] of the crop to [0 .. 255].  This is invariant to
-    # absolute ink brightness: a faint pencil mark that is only 10 grey-level
-    # units darker than paper becomes as vivid as MNIST-quality ink.
-    # Otsu then gets a proper bimodal histogram in every case.
     binarize_src = _enh_crop if _enh_crop is not None else region
     gray   = _to_gray(binarize_src)
     p_lo   = float(np.percentile(gray, 2))
@@ -422,24 +417,23 @@ def read_digit(region: np.ndarray, model,
     _, inv = cv2.threshold(gray, 0, 255,
                             cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
-    # Noise rejection via connected components: salt-and-pepper noise produces
-    # many tiny disconnected blobs; a real digit has 1-3 large components.
+    base = cv2.resize(inv, (28, 28), interpolation=cv2.INTER_AREA)
+
+    # Noise rejection: many tiny blobs with no dominant component = paper texture.
     n_labels, _, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
     areas = stats[1:, cv2.CC_STAT_AREA]   # skip background (label 0)
     if len(areas) == 0:
         reason = "blank(no blobs)"
-        _store(None, "", reason)
+        _store(base.copy(), "", reason)
         return "", 0.0, reason
     max_blob = int(areas.max())
     total_on = int((inv > 0).sum())
     n_blobs  = len(areas)
-    # Reject if the largest blob is too small OR noise dominates (many blobs, none big)
-    if max_blob < 25 or (n_blobs > 12 and max_blob < total_on * 0.30):
+    if max_blob < 8 or (n_blobs > 20 and max_blob < total_on * 0.20):
         reason = f"noise(blobs={n_blobs},max={max_blob})"
-        _store(None, "", reason)
+        _store(base.copy(), "", reason)
         return "", 0.0, reason
 
-    base = cv2.resize(inv, (28, 28), interpolation=cv2.INTER_AREA)
     t0   = _preprocess(base)
 
     # Build TTA batch: identity + rotations + slight shifts
