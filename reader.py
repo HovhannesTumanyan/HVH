@@ -19,7 +19,7 @@ MNIST_DIR    = Path(__file__).parent / "mnist_data"
 
 FILLED_THRESHOLD = 0.40   # relative darkness for the winning box (0=white, 1=black)
 FILLED_MARGIN    = 0.20   # winner must exceed second-best by at least this much
-BLANK_THRESHOLD  = 0.04   # below this → digit box is empty
+BLANK_THRESHOLD  = 0.02   # below this → digit box is empty
 
 
 # ── Region extraction ─────────────────────────────────────────────────────────
@@ -357,7 +357,7 @@ def _preprocess(inv: np.ndarray) -> "torch.Tensor":
     return (t - 0.1736) / 0.3317
 
 
-DIGIT_BLANK_REL = 0.05   # relative-darkness below this → digit box is empty
+DIGIT_BLANK_REL = 0.03   # relative-darkness below this → digit box is empty
 
 def _count_loops(inv: np.ndarray) -> int:
     """Count topological holes (closed loops) in a binarized digit image.
