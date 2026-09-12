@@ -187,6 +187,8 @@ def _fill_rows(
                 row.append((q, x + gap, orig_idx))
                 x += gap + q_w
                 placed.add(list_pos)
+            else:
+                break  # keep question order — no skip-ahead packing
 
         remaining = [item for pos, item in enumerate(remaining) if pos not in placed]
         if not row:
