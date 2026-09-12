@@ -17,8 +17,9 @@ import cv2
 MODEL_PATH   = Path(__file__).parent / "digit_model.pt"
 MNIST_DIR    = Path(__file__).parent / "mnist_data"
 
-FILLED_THRESHOLD = 0.40   # relative darkness for the winning box (0=white, 1=black)
+FILLED_THRESHOLD = 0.20   # relative darkness for the winning box (0=white, 1=black)
 FILLED_MARGIN    = 0.20   # winner must exceed second-best by at least this much
+FILLED_FRAC      = 0.65   # multi-fill: box must be >= this fraction of the darkest
 BLANK_THRESHOLD  = 0.02   # below this → digit box is empty
 
 
@@ -640,6 +641,7 @@ def read_all_boxes(
         sorted_ratios = sorted(ratios.values(), reverse=True)
         max_r  = sorted_ratios[0]
         sec_r  = sorted_ratios[1] if len(sorted_ratios) > 1 else 0.0
+
         if max_r < FILLED_THRESHOLD:
             # Nothing filled
             filled = {o: False for o in ratios}
@@ -650,9 +652,12 @@ def read_all_boxes(
             filled   = {o: (o == best_opt) for o in ratios}
             answer   = best_opt
         else:
-            # Two or more boxes too close → ambiguous
-            filled = {o: (r >= FILLED_THRESHOLD) for o, r in ratios.items()}
-            answer = "?"
+            # Gap is small — multiple boxes may be filled.
+            # A box is "also filled" if it's >= FILLED_FRAC of the darkest AND >= FILLED_THRESHOLD.
+            cutoff      = max(max_r * FILLED_FRAC, FILLED_THRESHOLD)
+            filled_opts = sorted(o for o, r in ratios.items() if r >= cutoff)
+            filled = {o: (o in set(filled_opts)) for o in ratios}
+            answer = ",".join(filled_opts) if len(filled_opts) > 1 else (filled_opts[0] if filled_opts else "?")
         mcq_by_q[q] = {"filled": filled, "answer": answer, "ratios": ratios}
 
     # ── Numeric answers ──────────────────────────────────────────────────────

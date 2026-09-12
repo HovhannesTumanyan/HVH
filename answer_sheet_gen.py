@@ -96,6 +96,8 @@ _NUM_PANEL_GAP  = 4.0 * mm   # gap between MCQ right edge and numeric side panel
 class MCQQuestion:
     type: Literal["mcq"] = "mcq"
     n_options: int = 4        # 2 – 6  (maps to a – f)
+    points:    int  = 1       # max points for this question
+    partial:   bool = False   # allow partial credit for multi-answer MCQ
 
     def validate(self):
         if not 2 <= self.n_options <= 6:
@@ -108,6 +110,7 @@ class NumericQuestion:
     n_digits:    int  = 4     # total handwriting boxes
     has_decimal: bool = False
     decimal_pos: int  = 2     # digit boxes BEFORE the decimal dot
+    points:      int  = 1     # max points for this question
 
     def content_width(self) -> float:
         w = self.n_digits * (NUM_BOX_W + NUM_BOX_GAP)
@@ -584,6 +587,8 @@ def parse_json_file(path: str) -> tuple[list[Question], bool, dict | None, dict]
         else:
             raise ValueError(f"{path}: question {i} has unknown type {item.get('type')!r}"
                              " — use \"mcq\" or \"numeric\"")
+        q.points  = int(item.get("points",  1))
+        q.partial = bool(item.get("partial", False))
         q.validate()
         questions.append(q)
         inline_answers.append(item.get("answer"))
@@ -781,8 +786,11 @@ def _draw_mcq_section(c: canvas.Canvas, y_top: float,
             bh = side
 
             if opt_i < q.n_options:
-                selected = (q_answers or {}).get(q_start + q_i, "").lower()
-                if selected == opts[opt_i]:
+                selected_raw = (q_answers or {}).get(q_start + q_i, "")
+                selected_set = {x.strip().lower()
+                                for x in str(selected_raw).replace(",", " ").split()
+                                if x.strip()}
+                if opts[opt_i] in selected_set:
                     c.setFillColor(colors.black)   # filled = correct answer
                 else:
                     c.setFillColor(colors.white)
@@ -1144,12 +1152,16 @@ def generate(
             f"Questions overflow by {-cap['avail_mm']:.1f} mm — reduce question count."
         )
 
-    # Map original q# → answer to sheet q# → answer using the order array.
+    # Map original q# → answer/points/partial to sheet q# using the order array.
     sheet_answers: dict = {}
-    if answers:
-        for sheet_pos, orig_q in enumerate(order, 1):
-            if orig_q in answers:
-                sheet_answers[sheet_pos] = answers[orig_q]
+    sheet_points:  dict = {}
+    sheet_partial: dict = {}
+    for sheet_pos, orig_q in enumerate(order, 1):
+        if answers and orig_q in answers:
+            sheet_answers[sheet_pos] = answers[orig_q]
+        q = questions[orig_q - 1]
+        sheet_points[sheet_pos]  = getattr(q, "points",  1)
+        sheet_partial[sheet_pos] = getattr(q, "partial", False)
 
     sheet_id = secrets.token_urlsafe(9)[:9]   # 9-char id → QR = "TL" + 9 = 11 chars
 
@@ -1209,7 +1221,9 @@ def generate(
     if not is_key:
         layout_json = output.replace(".pdf", "_layout.json")
         export_layout_json(questions, layout_json, sheet_id=sheet_id, bands=bands,
-                           answers=sheet_answers if sheet_answers else None)
+                           answers=sheet_answers if sheet_answers else None,
+                           question_points=sheet_points,
+                           question_partial=sheet_partial)
 
     return output, cap, order, sheet_id
 
@@ -1220,7 +1234,9 @@ def generate(
 
 def export_layout_json(questions: list[Question], path: str, sheet_id: str = "",
                        bands: list[dict] | None = None,
-                       answers: dict | None = None) -> None:
+                       answers: dict | None = None,
+                       question_points: dict | None = None,
+                       question_partial: dict | None = None) -> None:
     """
     Write all MCQ checkbox and numeric digit box positions to a JSON file.
 
@@ -1296,6 +1312,13 @@ def export_layout_json(questions: list[Question], path: str, sheet_id: str = "",
     }
     if answers:
         data["answers"] = {f"Q{int(k):02d}": str(v) for k, v in answers.items()}
+    if question_points:
+        data["question_points"] = {f"Q{int(k):02d}": v
+                                   for k, v in question_points.items()}
+    if question_partial:
+        data["question_partial"] = {f"Q{int(k):02d}": v
+                                    for k, v in question_partial.items()
+                                    if v}
     with open(path, "w") as f:
         _json.dump(data, f, indent=2)
 

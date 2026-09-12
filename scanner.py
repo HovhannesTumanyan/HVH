@@ -369,50 +369,100 @@ def main() -> None:
         results_path = args.results or stem + "_results.json"
 
         # Compare detected answers with correct answers from layout
-        correct_answers = layout.get("answers", {})
-        total = correct = wrong = missing = 0
+        correct_answers  = layout.get("answers", {})
+        question_points  = layout.get("question_points", {})
+        question_partial = layout.get("question_partial", {})
+        total = correct = wrong = missing = partial_count = 0
+        points_earned_total = points_max_total = 0
 
         json_results = {k: v for k, v in results.items() if k != "answers"}
         json_answers = {}
         for qk, qv in results["answers"].items():
             entry = {ek: ev for ek, ev in qv.items() if ek != "_crops"}
             if qk in correct_answers:
-                detected = str(qv.get("answer") or qv.get("value") or "").strip()
-                expected = str(correct_answers[qk]).strip()
-                if not detected or detected == "?":
-                    entry["correct"] = None   # not answered / uncertain
-                    missing += 1
-                else:
-                    # Numeric: strip leading zeros and compare as numbers
-                    def _norm(s):
-                        try:
-                            return str(float(s)) if "." in s else str(int(s))
-                        except ValueError:
-                            return s.lower()
-                    entry["correct"] = (_norm(detected) == _norm(expected))
-                    if entry["correct"]:
-                        correct += 1
+                expected_raw = str(correct_answers[qk]).strip()
+                entry["expected"] = expected_raw
+                max_pts    = question_points.get(qk, 1)
+                is_partial = question_partial.get(qk, False)
+                entry["points_max"] = max_pts
+                points_max_total += max_pts
+
+                if qv.get("type") == "mcq":
+                    expected_set = {x.strip().lower()
+                                    for x in expected_raw.replace(",", " ").split()
+                                    if x.strip()}
+                    detected_set = {opt for opt, checked
+                                    in qv.get("options", {}).items() if checked}
+                    if not detected_set:
+                        entry["correct"] = None
+                        entry["points_earned"] = 0
+                        missing += 1
                     else:
-                        wrong += 1
-                entry["expected"] = expected
+                        wrong_picks   = detected_set - expected_set
+                        correct_picks = detected_set & expected_set
+                        if wrong_picks:
+                            # any wrong selection → zero points
+                            entry["correct"] = False
+                            entry["points_earned"] = 0
+                            wrong += 1
+                        elif correct_picks == expected_set:
+                            entry["correct"] = True
+                            entry["points_earned"] = max_pts
+                            correct += 1
+                        elif is_partial and correct_picks:
+                            # correct subset, no wrong picks → partial credit
+                            frac = len(correct_picks) / len(expected_set)
+                            earned = round(frac * max_pts, 4)
+                            entry["correct"] = "partial"
+                            entry["points_earned"] = earned
+                            partial_count += 1
+                        else:
+                            entry["correct"] = False
+                            entry["points_earned"] = 0
+                            wrong += 1
+                else:
+                    # Numeric: binary
+                    detected = str(qv.get("value") or "").strip()
+                    if not detected or detected == "?":
+                        entry["correct"] = None
+                        entry["points_earned"] = 0
+                        missing += 1
+                    else:
+                        def _norm(s):
+                            try:
+                                return str(float(s)) if "." in s else str(int(s))
+                            except ValueError:
+                                return s.lower()
+                        entry["correct"] = (_norm(detected) == _norm(expected_raw))
+                        if entry["correct"]:
+                            entry["points_earned"] = max_pts
+                            correct += 1
+                        else:
+                            entry["points_earned"] = 0
+                            wrong += 1
+                points_earned_total += entry.get("points_earned", 0)
                 total += 1
             json_answers[qk] = entry
         json_results["answers"] = json_answers
 
         if total:
             json_results["score"] = {
-                "correct": correct,
-                "wrong":   wrong,
-                "missing": missing,
-                "total":   total,
+                "points":     points_earned_total,
+                "max_points": points_max_total,
+                "correct":    correct,
+                "partial":    partial_count,
+                "wrong":      wrong,
+                "missing":    missing,
+                "total":      total,
             }
 
         with open(results_path, "w") as f:
             json.dump(json_results, f, indent=2)
         print(f"Results saved        : {results_path}")
         if total:
-            print(f"Score                : {correct}/{total}  "
-                  f"(wrong={wrong}, missing={missing})")
+            print(f"Score                : {points_earned_total}/{points_max_total} pts  "
+                  f"({correct} correct, {partial_count} partial, "
+                  f"{wrong} wrong, {missing} missing)")
 
         # Save digit visualisation image
         from reader import build_digit_debug_image
