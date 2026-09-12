@@ -375,7 +375,8 @@ def main() -> None:
         total = correct = wrong = missing = partial_count = 0
         points_earned_total = points_max_total = 0
 
-        json_results = {k: v for k, v in results.items() if k != "answers"}
+        json_results = {k: v for k, v in results.items()
+                        if k not in ("answers", "_id_crops")}
         json_answers = {}
         for qk, qv in results["answers"].items():
             entry = {ek: ev for ek, ev in qv.items() if ek != "_crops"}
@@ -506,6 +507,18 @@ def main() -> None:
                     continue
                 fname = f"{stem}_{qk}_decimal_predpoint.png"
                 cv2.imwrite(str(crops_dir / fname), reg)
+                n_saved += 1
+            # Save ID box crops
+            for orig_bgr, digit_pos, pred, reason in results.get("_id_crops", []):
+                if orig_bgr is None or orig_bgr.size == 0:
+                    continue
+                import re as _re
+                m = _re.search(r'conf=(\d+\.\d+)', reason)
+                conf_str = f"_c{int(float(m.group(1))*100):02d}" if m else ""
+                pred_tag = pred if pred not in ("", "?") else \
+                           "blank" if pred == "" else "unk"
+                fname = f"{stem}_ID_d{digit_pos:02d}_pred{pred_tag}{conf_str}.png"
+                cv2.imwrite(str(crops_dir / fname), orig_bgr)
                 n_saved += 1
             print(f"Crops saved          : {n_saved} → {crops_dir}/")
 

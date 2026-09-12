@@ -608,6 +608,7 @@ def read_all_boxes(
 
     # ── Student ID ───────────────────────────────────────────────────────────
     id_digits = []
+    id_crops: list = []   # (orig_bgr, digit_pos, predicted_digit, reason)
     for b in sorted(layout.get("id_boxes", []), key=lambda x: x["digit"]):
         enh_region  = extract_region(warped_enh, b["x_mm"], b["y_mm"],
                                      b["w_mm"], b["h_mm"], scale, inner_frac=0.02)
@@ -616,11 +617,17 @@ def read_all_boxes(
         if digit_model is not None:
             enh_rd = relative_darkness(enh_region, page_white)
             force = enh_rd >= DIGIT_BLANK_REL
+            crop_buf: list = []
             d, _, _r = read_digit(orig_region, digit_model, page_white,
-                                   _force_read=force)
+                                   _force_read=force, _crops=crop_buf)
             id_digits.append(d)
+            if crop_buf:
+                orig_bgr, enh_bgr, bin28, digit_pred, reason = crop_buf[0]
+                id_crops.append((orig_bgr, b["digit"], digit_pred, reason))
         else:
             id_digits.append("?" if relative_darkness(enh_region, page_white) > BLANK_THRESHOLD else "")
+            if orig_region is not None and orig_region.size > 0:
+                id_crops.append((orig_region.copy(), b["digit"], "", "no_model"))
     student_id = "".join(id_digits)
 
     # ── MCQ answers ──────────────────────────────────────────────────────────
@@ -818,4 +825,4 @@ def read_all_boxes(
             "_crops": info.get("_crops", []),
         }
 
-    return {"student_id": student_id, "answers": answers}
+    return {"student_id": student_id, "answers": answers, "_id_crops": id_crops}
