@@ -1126,7 +1126,7 @@ def _draw_guide(c: canvas.Canvas) -> None:
     # Draw a thick dot near the bottom-centre
     dot_r = dw * 0.18
     c.setFillColor(colors.black)
-    c.circle(dot_bx + dw / 2, dbox_y + dh * 0.22, dot_r, stroke=0, fill=1)
+    c.circle(dot_bx + dw / 2, dbox_y + dh * 0.50, dot_r, stroke=0, fill=1)
     # Label above: "·" (decimal)
     c.setFont("Helvetica-Bold", 6.0)
     c.setFillColorRGB(0.25, 0.25, 0.25)
