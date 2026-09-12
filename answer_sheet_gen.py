@@ -1177,7 +1177,7 @@ def generate(
         c.drawRightString(CR - 3 * mm, CT - 5 * mm, "ANSWER KEY")
 
     # 5. Question sections
-    qa = sheet_answers or None
+    qa = (sheet_answers or None) if is_key else None
     y = CT - HEADER_H
     for band in bands:
         if band['kind'] == 'mcq':
