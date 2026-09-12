@@ -15,6 +15,7 @@ Coordinate system: ReportLab — origin at page bottom-left, y grows upward.
 
 from __future__ import annotations
 import io
+import random as _random
 import secrets
 from dataclasses import dataclass
 from typing import Literal
@@ -1142,7 +1143,13 @@ def generate(
     """
     order = list(range(1, len(questions) + 1))
     if shuffle:
-        questions, order = _optimal_order(questions)
+        # Randomly permute, then group by type for compact layout
+        perm      = list(range(len(questions)))
+        _random.shuffle(perm)
+        questions = [questions[i] for i in perm]
+        order     = [order[i]     for i in perm]
+        questions, sub_order = _optimal_order(questions)
+        order = [order[i - 1] for i in sub_order]
 
     for q in questions:
         q.validate()

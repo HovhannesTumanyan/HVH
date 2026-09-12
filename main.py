@@ -56,6 +56,7 @@ Answers file format (one line per question, same order)
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -159,12 +160,15 @@ def main() -> None:
 
     print(f"\nAnswer sheet : {path}")
     print(f"Sheet ID     : {sheet_id}")
-    if args.shuffle:
-        print(f"Question order (sheet pos → original Q#):")
-        for pos, orig in enumerate(order, 1):
-            print(f"  Sheet Q{pos:02d} ← original Q{orig}")
     if not cap["fits"]:
         print(f"WARNING: overflow by {-cap['avail_mm']:.1f} mm")
+
+    # ── Write queue.json (sheet position → original question number) ─────────
+    queue_path = f"{stem}_queue.json"
+    queue_data = {f"Q{pos:02d}": orig for pos, orig in enumerate(order, 1)}
+    with open(queue_path, "w") as f:
+        json.dump(queue_data, f, indent=2)
+    print(f"Queue        : {queue_path}")
 
     # ── Generate answer key PDF (auto when answers present) ─────────────────
     if answers:
