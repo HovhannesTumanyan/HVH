@@ -974,10 +974,10 @@ _DIGIT_STROKES: dict[int, list[list[tuple[float, float]]]] = {
          (0.50,0.50),(0.28,0.44),(0.14,0.26),(0.20,0.10),
          (0.50,0.04),(0.80,0.10),(0.86,0.28),(0.74,0.44),(0.50,0.50)]],
 
-    9: [[(0.82,0.60),(0.82,0.06)],
-        [(0.82,0.60),(0.70,0.88),(0.46,0.96),(0.20,0.84),
-         (0.14,0.62),(0.22,0.40),(0.48,0.34),
-         (0.70,0.42),(0.82,0.62)]],
+    9: [[(0.50,0.96),(0.26,0.90),(0.12,0.74),(0.14,0.54),
+         (0.30,0.40),(0.56,0.38),(0.80,0.52),(0.84,0.72),
+         (0.70,0.92),(0.50,0.96)],
+        [(0.82,0.62),(0.80,0.36),(0.68,0.12),(0.50,0.04),(0.36,0.06)]],
 }
 
 
@@ -1101,7 +1101,8 @@ def _draw_guide(c: canvas.Canvas) -> None:
     dgap    = 0.5 * mm
     dbox_y  = gcy - dh / 2 - 0.5 * mm
 
-    total_box_w = 10 * dw + 9 * dgap
+    dot_gap   = 3.0 * mm          # gap between digit row and decimal example
+    total_box_w = 10 * dw + 9 * dgap + dot_gap + dw
     digits_x0 = gx_r - total_box_w - 1.5 * mm   # right-align, 1.5 mm gap before QR
     for d in range(10):
         bx = digits_x0 + d * (dw + dgap)
@@ -1113,6 +1114,23 @@ def _draw_guide(c: canvas.Canvas) -> None:
         c.setDash([])
         digit_img = _mnist_digit_image(d, dw / mm, dh / mm)
         c.drawImage(digit_img, bx, dbox_y, width=dw, height=dh, mask="auto")
+
+    # Decimal point example
+    dot_bx = digits_x0 + 10 * (dw + dgap) - dgap + dot_gap
+    c.setFillColor(colors.white)
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(0.45)
+    c.setDash([1, 3])
+    c.rect(dot_bx, dbox_y, dw, dh, stroke=1, fill=1)
+    c.setDash([])
+    # Draw a thick dot near the bottom-centre
+    dot_r = dw * 0.18
+    c.setFillColor(colors.black)
+    c.circle(dot_bx + dw / 2, dbox_y + dh * 0.22, dot_r, stroke=0, fill=1)
+    # Label above: "·" (decimal)
+    c.setFont("Helvetica-Bold", 6.0)
+    c.setFillColorRGB(0.25, 0.25, 0.25)
+    c.drawCentredString(dot_bx + dw / 2, dbox_y + dh + 1.2 * mm, "decimal")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
