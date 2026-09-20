@@ -62,6 +62,14 @@ _ID_ZONE_L      = QR_EDGE + QR_SIZE                 # right edge of TL QR
 _ID_ZONE_R      = PAGE_W - QR_EDGE - QR_SIZE        # left edge of TR QR
 _ID_ZONE_CY     = PAGE_H - QR_EDGE - QR_SIZE / 2   # vertical centre of top QR band
 
+# ── Calibration dots (in left/right page margins, between corner QR zones) ────
+_CAL_X_LEFT_MM  = 4.5    # dot center x, left column (mm from left)
+_CAL_X_RIGHT_MM = 205.5  # dot center x, right column (mm from left)
+_CAL_R_MM       = 1.2    # dot radius (mm)
+_CAL_Y0_MM      = 32.0   # first dot y from top of page (mm)
+_CAL_Y1_MM      = 265.0  # last dot y from top of page (mm)
+_CAL_YSTEP_MM   = 15.0   # vertical step between dots (mm)
+
 # ── Header area (top of content rectangle) ────────────────────────────────────
 HEADER_H = 20 * mm            # title + name line + separator
 GUIDE_H  = 15 * mm            # instruction strip reserved at content-area bottom
@@ -1023,6 +1031,27 @@ def _mnist_digit_png(digit: int, w_mm: float, h_mm: float) -> bytes:
 _PNG_CACHE: dict[tuple, bytes] = {}
 
 
+def _cal_dot_positions() -> list[dict]:
+    """Return [{x_mm, y_mm}, …] for all calibration dots (top-left origin, mm)."""
+    dots: list[dict] = []
+    y = _CAL_Y0_MM
+    while y <= _CAL_Y1_MM + 0.1:
+        dots.append({"x_mm": _CAL_X_LEFT_MM,  "y_mm": round(y, 3)})
+        dots.append({"x_mm": _CAL_X_RIGHT_MM, "y_mm": round(y, 3)})
+        y += _CAL_YSTEP_MM
+    return dots
+
+
+def _draw_cal_dots(c: canvas.Canvas) -> None:
+    """Draw calibration alignment dots in the left and right page margins."""
+    PAGE_H_MM = PAGE_H / mm
+    c.setFillColor(colors.black)
+    for dot in _cal_dot_positions():
+        cx_pt = dot["x_mm"] * mm
+        cy_pt = (PAGE_H_MM - dot["y_mm"]) * mm   # ReportLab: y from bottom
+        c.circle(cx_pt, cy_pt, _CAL_R_MM * mm, stroke=0, fill=1)
+
+
 def _draw_guide(c: canvas.Canvas) -> None:
     """
     Instruction strip drawn between the two bottom corner QR codes.
@@ -1194,6 +1223,9 @@ def generate(
     # 1. Corner QR codes
     _draw_corner_qrs(c, sheet_id)
 
+    # 1b. Calibration dots in margins (for warp refinement)
+    _draw_cal_dots(c)
+
     # 2. Student ID between top QRs
     _draw_student_id(c)
 
@@ -1327,6 +1359,7 @@ def export_layout_json(questions: list[Question], path: str, sheet_id: str = "",
         "sheet_id":  sheet_id,
         "page_w_mm": PAGE_W / mm,
         "page_h_mm": PAGE_H / mm,
+        "cal_dots":  _cal_dot_positions(),
         "mcq_boxes": mcq_boxes,
         "num_boxes": num_boxes,
         "id_boxes":  id_boxes,

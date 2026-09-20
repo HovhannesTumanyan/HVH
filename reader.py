@@ -48,6 +48,118 @@ def _to_gray(region: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(region, cv2.COLOR_BGR2GRAY) if region.ndim == 3 else region
 
 
+def _detect_cal_dot(
+    gray: np.ndarray,
+    x_mm: float,
+    y_mm: float,
+    scale: float,
+    search_mm: float = 5.0,
+) -> tuple[float, float] | None:
+    """Find a calibration dot near the expected position. Returns (cx, cy) px or None."""
+    ex = int(round(x_mm * scale))
+    ey = int(round(y_mm * scale))
+    sr = int(round(search_mm * scale))
+    h, w = gray.shape[:2]
+    x1, x2 = max(0, ex - sr), min(w, ex + sr)
+    y1, y2 = max(0, ey - sr), min(h, ey + sr)
+    if x2 - x1 < 4 or y2 - y1 < 4:
+        return None
+    roi = gray[y1:y2, x1:x2]
+    bg  = float(np.percentile(roi, 80))
+    thr = max(int(bg * 0.55), 20)
+    _, mask = cv2.threshold(roi, thr, 255, cv2.THRESH_BINARY_INV)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best_cx = best_cy = None
+    best_d  = sr * 0.75
+    for cnt in contours:
+        if cv2.contourArea(cnt) < 8:
+            continue
+        M = cv2.moments(cnt)
+        if M["m00"] < 1:
+            continue
+        cx = M["m10"] / M["m00"]
+        cy = M["m01"] / M["m00"]
+        d  = ((cx - sr) ** 2 + (cy - sr) ** 2) ** 0.5
+        if d < best_d:
+            best_d, best_cx, best_cy = d, cx + x1, cy + y1
+    return (best_cx, best_cy) if best_cx is not None else None
+
+
+def refine_with_cal_dots(
+    warped: np.ndarray,
+    cal_dots: list[dict],
+    scale: float,
+) -> tuple[np.ndarray, int]:
+    """
+    Detect calibration dots printed in the page margins and apply a thin-plate-spline
+    refinement to correct lens distortion / residual QR-warp error.
+
+    Returns (refined_warped, n_dots_found).
+    Falls back to a second overdetermined homography if scipy is unavailable.
+    Returns (original, 0) if fewer than 6 dots are found.
+    """
+    if not cal_dots:
+        return warped, 0
+
+    gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+    src_pts: list[list[float]] = []
+    dst_pts: list[list[float]] = []
+    for dot in cal_dots:
+        det = _detect_cal_dot(gray, dot["x_mm"], dot["y_mm"], scale)
+        if det is None:
+            continue
+        src_pts.append([det[0],          det[1]])
+        dst_pts.append([dot["x_mm"] * scale, dot["y_mm"] * scale])
+
+    n = len(src_pts)
+    if n < 6:
+        return warped, n
+
+    src = np.array(src_pts, dtype=np.float64)
+    dst = np.array(dst_pts, dtype=np.float64)
+    h, w = warped.shape[:2]
+
+    # displacement at each expected (dst) position: how far actual (src) is from dst
+    disp = src - dst   # for remap: output[dst] should read from input[src] = dst + disp
+
+    try:
+        from scipy.interpolate import RBFInterpolator
+
+        step = max(10, int(scale * 1.5))
+        gx   = np.arange(0, w, step, dtype=np.float64)
+        gy   = np.arange(0, h, step, dtype=np.float64)
+        GX, GY = np.meshgrid(gx, gy)
+        grid   = np.column_stack([GX.ravel(), GY.ravel()])
+
+        rbf      = RBFInterpolator(dst, disp, smoothing=0.5, kernel="thin_plate_spline")
+        disp_c   = rbf(grid).reshape(len(gy), len(gx), 2).astype(np.float32)
+
+        dx = cv2.resize(disp_c[:, :, 0], (w, h), interpolation=cv2.INTER_LINEAR)
+        dy = cv2.resize(disp_c[:, :, 1], (w, h), interpolation=cv2.INTER_LINEAR)
+
+        mx, my  = np.meshgrid(np.arange(w, dtype=np.float32),
+                               np.arange(h, dtype=np.float32))
+        map_x   = (mx + dx).astype(np.float32)
+        map_y   = (my + dy).astype(np.float32)
+        refined = cv2.remap(warped, map_x, map_y, cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_REPLICATE)
+        return refined, n
+
+    except ImportError:
+        H2, _ = cv2.findHomography(
+            np.array(src_pts, dtype=np.float32),
+            np.array(dst_pts, dtype=np.float32),
+            cv2.RANSAC, 3.0,
+        )
+        if H2 is None:
+            return warped, n
+        refined = cv2.warpPerspective(warped, H2, (w, h),
+                                       borderMode=cv2.BORDER_REPLICATE)
+        return refined, n
+
+
 def enhance_contrast(warped: np.ndarray,
                      clip_limit: float = 2.0,
                      tile_grid: int = 8) -> np.ndarray:

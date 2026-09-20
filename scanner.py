@@ -337,6 +337,14 @@ def main() -> None:
     H_inv  = np.linalg.inv(H)
     warped = warp_image(img, H, args.scale)
 
+    # 2b. Refine warp with calibration dots (corrects lens distortion / residual error)
+    from reader import refine_with_cal_dots
+    cal_dots = layout.get("cal_dots", [])
+    warped, n_cal = refine_with_cal_dots(warped, cal_dots, args.scale)
+    if cal_dots:
+        print(f"Calibration dots     : {n_cal}/{len(cal_dots)} found"
+              + (" → refined warp" if n_cal >= 6 else " → too few, skipped"))
+
     # 3. Annotate original photo with coloured dots
     centres   = collect_centres(layout)
     out_path  = args.out or stem + "_annotated.jpg"
